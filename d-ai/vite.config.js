@@ -1,5 +1,6 @@
 import {defineConfig, loadEnv} from "vite";
 import react from "@vitejs/plugin-react";
+import {dAiApiPlugin} from "./server/daiApiPlugin.js";
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, process.cwd(), "");
@@ -7,7 +8,7 @@ export default defineConfig(({mode}) => {
   const casibaseTarget = env.VITE_CASIBASE_TARGET || "http://casibase.local:14000";
 
   return {
-    plugins: [react()],
+    plugins: [react(), dAiApiPlugin({casibaseTarget})],
     server: {
       host: "0.0.0.0",
       port: Number(env.VITE_PORT || 5173),

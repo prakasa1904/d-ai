@@ -55,7 +55,25 @@ function assertOk(payload, fallback) {
   return payload;
 }
 
+export function resolveLoginIdentity(username) {
+  const trimmedUsername = String(username || "").trim();
+  const separatorIndex = trimmedUsername.indexOf("/");
+
+  if (separatorIndex > 0 && separatorIndex < trimmedUsername.length - 1) {
+    return {
+      organization: authConfig.organization,
+      username: trimmedUsername.slice(separatorIndex + 1).trim(),
+    };
+  }
+
+  return {
+    organization: authConfig.organization,
+    username: trimmedUsername,
+  };
+}
+
 export async function loginWithPassword(username, password) {
+  const identity = resolveLoginIdentity(username);
   const state = `d-ai-${Date.now()}-${randomName()}`;
   const query = new URLSearchParams({
     clientId: authConfig.clientId,
@@ -70,9 +88,9 @@ export async function loginWithPassword(username, password) {
   });
 
   const casdoorLogin = await apiPost(`${casdoorBase}`, `/api/login?${query.toString()}`, {
-    username,
+    username: identity.username,
     password,
-    organization: authConfig.organization,
+    organization: identity.organization,
     application: authConfig.application,
     signinMethod: "Password",
     type: "code",
@@ -96,6 +114,11 @@ export async function getAccount() {
 export async function signOut() {
   await apiPost(casibaseBase, "/api/signout").catch(() => null);
   await apiPost(casdoorBase, "/api/logout").catch(() => null);
+}
+
+export async function syncTokenState(account, state) {
+  const result = await apiPost("", "/api/d-ai/token-state", {account, state});
+  return assertOk(result, "Failed to sync token state").data || state;
 }
 
 export async function getStores() {

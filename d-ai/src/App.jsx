@@ -10,6 +10,7 @@ import {
   openAnswerStream,
   sendChatMessage,
   signOut,
+  syncTokenState,
 } from "./api";
 import {
   createTokenRecord,
@@ -204,7 +205,7 @@ function AppHeader({account, currentPath, onNavigate, onLogout, onNewChat}) {
 }
 
 function LoginPage({onLogin}) {
-  const [username, setUsername] = useState("admin");
+  const [username, setUsername] = useState("user");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [isBusy, setIsBusy] = useState(false);
@@ -464,19 +465,23 @@ function ApiReference({token, onCopy}) {
   );
 }
 
-function limitText(value) {
+function limitText(value, required = false) {
+  if (required && value <= 0) {
+    return "Not set";
+  }
+
   return value > 0 ? value.toLocaleString() : "Unlimited";
 }
 
-function LimitMeter({label, used, limit}) {
+function LimitMeter({label, used, limit, required, missing}) {
   const percent = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
-  const isExceeded = limit > 0 && used >= limit;
+  const isExceeded = missing || (limit > 0 && used >= limit);
 
   return (
-    <div className="limit-meter">
+    <div className={`limit-meter ${missing ? "missing" : ""}`}>
       <div>
         <span>{label}</span>
-        <strong>{used.toLocaleString()} / {limitText(limit)}</strong>
+        <strong>{used.toLocaleString()} / {limitText(limit, required)}</strong>
       </div>
       <div className="limit-track">
         <div className={`limit-fill ${isExceeded ? "exceeded" : ""}`} style={{width: `${percent}%`}} />
@@ -506,7 +511,7 @@ function RateLimitTracker({tokenData, selectedTokenId, onSelectedTokenId, onUpda
       <div className="section-heading token-chart-heading">
         <div>
           <h2>Rate Limit Tracker</h2>
-          <p className="side-note">Track and enforce limits for one token at a time. A value of 0 means unlimited.</p>
+          <p className="side-note">Total token quota is required. Rolling request limits can stay 0 when you do not want a rolling cap.</p>
         </div>
         <select value={token?.id || ""} onChange={(event) => onSelectedTokenId(event.target.value)}>
           {tokenData.tokens.map((item) => (
@@ -521,7 +526,14 @@ function RateLimitTracker({tokenData, selectedTokenId, onSelectedTokenId, onUpda
         <>
           <div className="limit-grid">
             {status.checks.map((check) => (
-              <LimitMeter key={check.key} label={check.label} used={check.used} limit={check.limit} />
+              <LimitMeter
+                key={check.key}
+                label={check.label}
+                limit={check.limit}
+                missing={check.missing}
+                required={check.required}
+                used={check.used}
+              />
             ))}
           </div>
 
@@ -529,9 +541,10 @@ function RateLimitTracker({tokenData, selectedTokenId, onSelectedTokenId, onUpda
             <label>
               Total token quota
               <input
-                min="0"
+                min="1"
+                placeholder="Required"
                 type="number"
-                value={limits.totalTokens || 0}
+                value={limits.totalTokens || ""}
                 onChange={(event) => updateLimit("totalTokens", event.target.value)}
               />
             </label>
@@ -713,6 +726,8 @@ function DashboardPage({account, onLogout, onNavigate}) {
 
 function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteToken, onLogout, onNavigate, onUpdateTokenLimits}) {
   const [name, setName] = useState("");
+  const [tokenLimit, setTokenLimit] = useState("");
+  const [formError, setFormError] = useState("");
   const [notice, setNotice] = useState("");
   const [selectedSeriesTokenId, setSelectedSeriesTokenId] = useState("all");
   const [selectedLimitTokenId, setSelectedLimitTokenId] = useState("");
@@ -748,8 +763,18 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
 
   function submit(event) {
     event.preventDefault();
-    const token = onCreateToken(name);
+    const totalTokens = Math.floor(Number(tokenLimit));
+
+    if (!Number.isFinite(totalTokens) || totalTokens <= 0) {
+      setFormError("Set a token quota greater than 0.");
+      setNotice("");
+      return;
+    }
+
+    const token = onCreateToken(name, {totalTokens});
     setName("");
+    setTokenLimit("");
+    setFormError("");
     setNotice(`${token.name} created`);
   }
 
@@ -787,10 +812,21 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
               onChange={(event) => setName(event.target.value)}
               placeholder="Token name"
             />
+            <input
+              aria-label="Total token quota"
+              inputMode="numeric"
+              min="1"
+              required
+              type="number"
+              value={tokenLimit}
+              onChange={(event) => setTokenLimit(event.target.value)}
+              placeholder="Token quota"
+            />
             <button className="primary-button">Create token</button>
           </form>
         </div>
 
+        {formError ? <div className="error-banner">{formError}</div> : null}
         {notice ? <div className="success-banner">{notice}</div> : null}
 
         <section className="stats-grid" aria-label="Token totals">
@@ -838,7 +874,7 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
                     <span className={`status-pill ${isTokenActive(token) ? "active" : "inactive"}`}>{token.status}</span>
                     <div className="token-usage">
                       <span>{usage.requests || 0} requests</span>
-                      <span>{usage.totalTokens || 0} tokens</span>
+                      <span>{usage.totalTokens || 0} / {limitText(token.limits?.totalTokens || 0, true)} quota</span>
                       <span>{formatChatTime(usage.lastUsedAt || token.lastUsedAt)}</span>
                     </div>
                     <div className="token-actions">
@@ -1317,16 +1353,31 @@ export default function App() {
     setPath(nextPath);
   }
 
+  function persistTokenData(next) {
+    saveTokenState(account, next);
+
+    if (!account) {
+      return;
+    }
+
+    syncTokenState(account, next)
+      .then((synced) => {
+        saveTokenState(account, synced);
+        setTokenData(synced);
+      })
+      .catch(() => null);
+  }
+
   function updateTokenData(updater) {
     setTokenData((current) => {
       const next = updater(current);
-      saveTokenState(account, next);
+      persistTokenData(next);
       return next;
     });
   }
 
-  function createManagedToken(name) {
-    const token = createTokenRecord(name);
+  function createManagedToken(name, limits) {
+    const token = createTokenRecord(name, limits);
     updateTokenData((current) => ({
       ...current,
       tokens: [token, ...current.tokens],
@@ -1385,7 +1436,19 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    setTokenData(account ? loadTokenState(account) : emptyTokenState());
+    if (!account) {
+      setTokenData(emptyTokenState());
+      return;
+    }
+
+    const next = loadTokenState(account);
+    setTokenData(next);
+    syncTokenState(account, next)
+      .then((synced) => {
+        saveTokenState(account, synced);
+        setTokenData(synced);
+      })
+      .catch(() => null);
   }, [account]);
 
   if (isChecking) {

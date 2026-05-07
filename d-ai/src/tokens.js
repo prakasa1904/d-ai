@@ -77,7 +77,7 @@ export function saveTokenState(account, state) {
   }));
 }
 
-export function createTokenRecord(name) {
+export function createTokenRecord(name, limits = {}) {
   const createdAt = new Date().toISOString();
   const suffix = randomText(5).toLowerCase();
 
@@ -88,7 +88,7 @@ export function createTokenRecord(name) {
     status: "Active",
     createdAt,
     lastUsedAt: "",
-    limits: defaultTokenLimits(),
+    limits: normalizeTokenLimits(limits),
   };
 }
 
@@ -244,6 +244,7 @@ export function getTokenLimitStatus(token, usage, pendingTokens = 0, now = new D
       used: stats.all.totalTokens,
       projected: stats.all.totalTokens + Number(pendingTokens || 0),
       limit: limits.totalTokens,
+      required: true,
     },
     {
       key: "requestsPerMinute",
@@ -273,16 +274,25 @@ export function getTokenLimitStatus(token, usage, pendingTokens = 0, now = new D
       projected: stats.day.totalTokens + Number(pendingTokens || 0),
       limit: limits.tokensPerDay,
     },
-  ].map((check) => ({
-    ...check,
-    remaining: check.limit > 0 ? Math.max(0, check.limit - check.used) : Infinity,
-    exceeded: check.limit > 0 && check.projected > check.limit,
-  }));
-  const blocked = checks.filter((check) => check.exceeded);
+  ].map((check) => {
+    const missing = Boolean(check.required && check.limit <= 0);
+    const exceeded = !missing && check.limit > 0 && check.projected > check.limit;
+
+    return {
+      ...check,
+      missing,
+      remaining: check.limit > 0 ? Math.max(0, check.limit - check.used) : Infinity,
+      exceeded,
+      blocked: missing || exceeded,
+    };
+  });
+  const blocked = checks.filter((check) => check.blocked);
 
   return {
     allowed: blocked.length === 0,
-    reasons: blocked.map((check) => `${check.label} limit reached (${check.used}/${check.limit})`),
+    reasons: blocked.map((check) => check.missing
+      ? `${check.label} must be set`
+      : `${check.label} limit reached (${check.used}/${check.limit})`),
     checks,
     stats,
     limits,
