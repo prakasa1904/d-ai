@@ -1,6 +1,6 @@
 # D-AI
 
-Custom React frontend for a local Casdoor + Casibase stack. It includes Casdoor login, Casibase chat, chat history, usage dashboard, token management, token limits, and a local OpenAI-compatible chat endpoint.
+Custom React frontend for a local Casdoor + Casibase stack. It includes Casdoor login and registration, Casibase chat, editable chat history, streaming steer/stop controls, usage dashboard, token management, optional token limits, user profile management, and a local OpenAI-compatible chat endpoint.
 
 ## Prerequisites
 
@@ -68,6 +68,8 @@ Default password: user
 ```
 
 D-AI hardcodes normal user login to Casdoor organization `ifm`, so the login page only asks for username and password.
+The same hidden organization is used by the register form, so new users are created under `ifm`.
+Registration only asks for display name, username, and password. Email can be added later from `Profile`; sending email during Casdoor signup requires a verification-code flow.
 
 Default D-AI login:
 
@@ -100,6 +102,7 @@ Default local targets:
 ```text
 Casdoor target:  http://casdoor.local:8000
 Casibase target: http://casibase.local:14000
+Shared store:    admin/store-built-in
 ```
 
 The Vite dev server proxies browser calls:
@@ -107,6 +110,14 @@ The Vite dev server proxies browser calls:
 ```text
 /casdoor  -> http://casdoor.local:8000
 /casibase -> http://casibase.local:14000
+```
+
+D-AI also adds local Vite middleware routes:
+
+```text
+/api/d-ai/casdoor-token       Exchanges a Casdoor OAuth code for a profile access token
+/api/d-ai/token-state         Syncs browser-created D-AI tokens into the local API layer
+/api/v1/chat/completions      OpenAI-compatible chat endpoint
 ```
 
 Optional `.env.local` overrides:
@@ -118,10 +129,14 @@ VITE_CASIBASE_TARGET=http://casibase.local:14000
 VITE_CASDOOR_BASE=/casdoor
 VITE_CASIBASE_BASE=/casibase
 VITE_CASDOOR_CLIENT_ID=ba3a96dbc430c5c6a22b
+VITE_CASDOOR_CLIENT_SECRET=9228f4ce27971ca5c188cac7489dc0f304a122b6
 VITE_CASDOOR_APPLICATION=casibase
 VITE_CASDOOR_REDIRECT_URI=http://casibase.local:14000/callback
 VITE_CASDOOR_SCOPE=profile
+VITE_CASIBASE_SHARED_STORE_ID=admin/store-built-in
 ```
+
+`VITE_CASDOOR_CLIENT_SECRET` is used by the local Vite middleware for development profile updates. Do not expose this dev middleware directly to untrusted clients.
 
 ## Useful Commands
 
@@ -133,18 +148,29 @@ npm run build
 npm run preview
 ```
 
+Restart `npm run dev` after changing `vite.config.js`, server middleware, or `.env.local`.
+
+## App Features
+
+- Login page: sign in with a Casdoor user or register a new `ifm` user without exposing the organization field.
+- Chat page: create new chats, open history, rename chats, delete chats, and stop or steer an active streaming response.
+- Dashboard page: view signed-in user chat and message usage.
+- Tokens page: create/copy/delete/activate/deactivate D-AI tokens, view token usage, inspect time-series usage, and configure optional rate limits.
+- Profile page: update Casdoor profile fields such as display name, avatar, contact info, work info, preferences, and bio.
+
+Profile updates require a Casdoor access token. New logins obtain it automatically. If you were already signed in before this feature was added, open `Profile`, enter your current password in `Confirm Access`, and save again.
+
+Casibase can still generate its own chat titles, such as `New Chat - 1`, after a conversation is created. Use the sidebar rename or delete actions to manage those chat history entries.
+
 ## Token Limits
 
-New tokens must be created with a lifetime token quota. Existing tokens without a quota are invalid until edited in the rate-limit tracker.
-
-Rolling limits can stay `0` when you do not want those specific caps:
+Token quotas are optional when creating a token. Leave the quota blank, or set any limit to `0`, when you do not want that cap:
 
 - Requests per minute.
 - Requests per hour.
 - Requests per day.
 - Tokens per day.
-
-The lifetime `Total token quota` cannot be unlimited.
+- Total token quota.
 
 ## Chat Completions API
 
@@ -179,7 +205,7 @@ That folder is git-ignored because it contains bearer tokens and browser session
 
 ## Production Note
 
-The `/api/v1/chat/completions` route is implemented as Vite local middleware for development. Before exposing this API to real clients, move token validation, quota enforcement, and Casibase proxy logic into a production backend.
+The local `/api/d-ai/*` and `/api/v1/chat/completions` routes are implemented as Vite middleware for development. Before exposing this API to real clients, move Casdoor token exchange, token validation, quota enforcement, and Casibase proxy logic into a production backend.
 
 ## Troubleshooting
 
@@ -192,3 +218,6 @@ docker compose restart casibase
 
 If curl returns `404` for `/api/v1/chat/completions`, restart the Vite dev server because `vite.config.js` defines that local route.
 
+If registration returns `The verification code has not been sent yet!`, refresh D-AI and restart `npm run dev`. The D-AI register form should not ask for email during initial signup; add email later from `Profile`.
+
+If profile save returns `Unauthorized operation`, refresh `/profile`. If the `Confirm Access` panel appears, enter the current Casdoor password once and save again. If the route still fails, restart the Vite dev server so `/api/d-ai/casdoor-token` is available.

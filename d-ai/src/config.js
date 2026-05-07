@@ -1,5 +1,6 @@
 export const casdoorBase = import.meta.env.VITE_CASDOOR_BASE || "/casdoor";
 export const casibaseBase = import.meta.env.VITE_CASIBASE_BASE || "/casibase";
+export const sharedStoreId = import.meta.env.VITE_CASIBASE_SHARED_STORE_ID || "admin/store-built-in";
 
 export const authConfig = {
   clientId: import.meta.env.VITE_CASDOOR_CLIENT_ID || "ba3a96dbc430c5c6a22b",

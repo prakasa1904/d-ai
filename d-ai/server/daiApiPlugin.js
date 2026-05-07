@@ -247,6 +247,51 @@ async function syncTokenState({request, response, root}) {
   });
 }
 
+async function exchangeCasdoorToken({request, response, casdoorTarget, casdoorClientId, casdoorClientSecret, casdoorRedirectUri}) {
+  if (request.method !== "POST") {
+    sendError(response, 405, "Only POST is supported");
+    return;
+  }
+
+  const body = await readJsonBody(request);
+  if (!body.code) {
+    sendError(response, 400, "Missing Casdoor authorization code");
+    return;
+  }
+
+  if (!casdoorClientSecret) {
+    sendError(response, 500, "Missing Casdoor client secret", "server_error");
+    return;
+  }
+
+  const tokenResponse = await fetch(`${casdoorTarget}/api/login/oauth/access_token`, {
+    method: "POST",
+    headers: {"Content-Type": "application/x-www-form-urlencoded"},
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: casdoorClientId,
+      client_secret: casdoorClientSecret,
+      code: body.code,
+      redirect_uri: casdoorRedirectUri,
+    }),
+  });
+  const payload = await tokenResponse.json().catch(() => null);
+
+  if (!tokenResponse.ok || !payload?.access_token) {
+    sendError(response, tokenResponse.status || 500, payload?.error_description || payload?.error || "Failed to exchange Casdoor token");
+    return;
+  }
+
+  sendJson(response, 200, {
+    status: "ok",
+    data: {
+      accessToken: payload.access_token,
+      expiresIn: payload.expires_in,
+      tokenType: payload.token_type || "Bearer",
+    },
+  });
+}
+
 function getBearerToken(request) {
   const header = request.headers.authorization || "";
   const match = /^Bearer\s+(.+)$/i.exec(header);
@@ -296,10 +341,9 @@ function promptFromOpenAiMessages(messages) {
   return messageContentToText(lastUser?.content).trim();
 }
 
-async function chooseStore(client, sessionCookie) {
-  const result = await client.get("/api/get-stores?owner=admin", sessionCookie);
-  const stores = assertCasibaseOk(result, "Failed to load stores").data || [];
-  return stores.find((store) => store.isDefault) || stores[0] || null;
+async function chooseStore(client, sessionCookie, sharedStoreId) {
+  const result = await client.get(`/api/get-store?id=${encodeURIComponent(sharedStoreId)}`, sessionCookie);
+  return assertCasibaseOk(result, "Failed to load shared store").data || null;
 }
 
 async function createChat(client, account, store, sessionCookie) {
@@ -524,8 +568,8 @@ function completionResponse({id, model, content, usage}) {
   };
 }
 
-async function runCasibaseTurn({client, account, promptText, sessionCookie}) {
-  const store = await chooseStore(client, sessionCookie);
+async function runCasibaseTurn({client, account, promptText, sessionCookie, sharedStoreId}) {
+  const store = await chooseStore(client, sessionCookie, sharedStoreId);
 
   if (!store) {
     throw new Error("No Casibase store is available");
@@ -544,7 +588,7 @@ async function runCasibaseTurn({client, account, promptText, sessionCookie}) {
   return {chat: updatedChat, answer};
 }
 
-async function handleChatCompletions({request, response, root, casibaseTarget}) {
+async function handleChatCompletions({request, response, root, casibaseTarget, sharedStoreId}) {
   if (request.method !== "POST") {
     sendError(response, 405, "Only POST is supported");
     return;
@@ -604,6 +648,7 @@ async function handleChatCompletions({request, response, root, casibaseTarget}) 
         account,
         promptText,
         sessionCookie: match.accountState.sessionCookie,
+        sharedStoreId,
       });
       let streamedText = "";
 
@@ -644,6 +689,7 @@ async function handleChatCompletions({request, response, root, casibaseTarget}) 
     account,
     promptText,
     sessionCookie: match.accountState.sessionCookie,
+    sharedStoreId,
   });
   const content = await readAnswer({
     client,
@@ -667,6 +713,11 @@ async function handleChatCompletions({request, response, root, casibaseTarget}) 
 function installMiddleware(server, options) {
   const root = options.root || process.cwd();
   const casibaseTarget = options.casibaseTarget;
+  const casdoorTarget = options.casdoorTarget;
+  const casdoorClientId = options.casdoorClientId;
+  const casdoorClientSecret = options.casdoorClientSecret;
+  const casdoorRedirectUri = options.casdoorRedirectUri;
+  const sharedStoreId = options.sharedStoreId || "admin/store-built-in";
 
   server.middlewares.use(async (request, response, next) => {
     try {
@@ -677,8 +728,20 @@ function installMiddleware(server, options) {
         return;
       }
 
+      if (url.pathname === "/api/d-ai/casdoor-token") {
+        await exchangeCasdoorToken({
+          request,
+          response,
+          casdoorTarget,
+          casdoorClientId,
+          casdoorClientSecret,
+          casdoorRedirectUri,
+        });
+        return;
+      }
+
       if (url.pathname === "/api/v1/chat/completions") {
-        await handleChatCompletions({request, response, root, casibaseTarget});
+        await handleChatCompletions({request, response, root, casibaseTarget, sharedStoreId});
         return;
       }
 

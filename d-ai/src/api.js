@@ -1,9 +1,10 @@
-import {authConfig, casdoorBase, casibaseBase} from "./config";
+import {authConfig, casdoorBase, casibaseBase, sharedStoreId} from "./config";
 
 const jsonHeaders = {
   "Accept-Language": "en",
   "Content-Type": "text/plain;charset=UTF-8",
 };
+const casdoorTokenStoragePrefix = "d-ai.casdoor-token";
 
 function randomName() {
   return Math.random().toString(36).slice(2, 8);
@@ -30,19 +31,19 @@ async function readJson(response) {
   return payload;
 }
 
-async function apiGet(base, path) {
+async function apiGet(base, path, headers = {}) {
   const response = await fetch(`${base}${path}`, {
     credentials: "include",
-    headers: {"Accept-Language": "en"},
+    headers: {"Accept-Language": "en", ...headers},
   });
   return readJson(response);
 }
 
-async function apiPost(base, path, body) {
+async function apiPost(base, path, body, headers = {}) {
   const response = await fetch(`${base}${path}`, {
     method: "POST",
     credentials: "include",
-    headers: jsonHeaders,
+    headers: {...jsonHeaders, ...headers},
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return readJson(response);
@@ -53,6 +54,108 @@ function assertOk(payload, fallback) {
     throw new Error(payload?.msg || fallback);
   }
   return payload;
+}
+
+const profileColumns = [
+  "displayName",
+  "firstName",
+  "lastName",
+  "email",
+  "phone",
+  "countryCode",
+  "region",
+  "location",
+  "title",
+  "affiliation",
+  "homepage",
+  "avatar",
+  "bio",
+  "language",
+  "gender",
+  "birthday",
+  "education",
+];
+
+function casdoorTokenStorageKey(owner, name) {
+  return `${casdoorTokenStoragePrefix}.${owner || ""}.${name || ""}`;
+}
+
+function getStoredCasdoorToken(owner, name) {
+  try {
+    return localStorage.getItem(casdoorTokenStorageKey(owner, name)) || "";
+  } catch {
+    return "";
+  }
+}
+
+function storeCasdoorToken(owner, name, accessToken) {
+  if (!owner || !name || !accessToken) {
+    return;
+  }
+
+  localStorage.setItem(casdoorTokenStorageKey(owner, name), accessToken);
+}
+
+export function hasCasdoorProfileToken(account) {
+  return Boolean(getStoredCasdoorToken(account?.owner, account?.name));
+}
+
+async function exchangeCasdoorToken(code) {
+  const result = await apiPost("", "/api/d-ai/casdoor-token", {code});
+  return assertOk(result, "Failed to exchange Casdoor token").data?.accessToken || "";
+}
+
+function authQuery(state) {
+  return new URLSearchParams({
+    clientId: authConfig.clientId,
+    responseType: "code",
+    redirectUri: authConfig.redirectUri,
+    type: "code",
+    scope: authConfig.scope,
+    state,
+    nonce: "",
+    code_challenge_method: "",
+    code_challenge: "",
+  });
+}
+
+async function getCasdoorLoginCode(identity) {
+  const state = `d-ai-${Date.now()}-${randomName()}`;
+  const query = authQuery(state);
+
+  const casdoorLogin = await apiPost(`${casdoorBase}`, `/api/login?${query.toString()}`, {
+    username: identity.username,
+    password: identity.password,
+    organization: identity.organization,
+    application: authConfig.application,
+    signinMethod: "Password",
+    type: "code",
+    language: "",
+  });
+
+  assertOk(casdoorLogin, "Casdoor login failed");
+  return {code: casdoorLogin.data, state};
+}
+
+async function signInCasibaseWithCode(code, state) {
+  const signin = await apiPost(
+    `${casibaseBase}`,
+    `/api/signin?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+  );
+
+  return assertOk(signin, "Casibase sign-in failed");
+}
+
+export async function refreshCasdoorProfileToken(account, password) {
+  const identity = {
+    organization: account.owner,
+    username: account.name,
+    password,
+  };
+  const profileCode = await getCasdoorLoginCode(identity);
+  const accessToken = await exchangeCasdoorToken(profileCode.code);
+  storeCasdoorToken(identity.organization, identity.username, accessToken);
+  return accessToken;
 }
 
 export function resolveLoginIdentity(username) {
@@ -73,42 +176,102 @@ export function resolveLoginIdentity(username) {
 }
 
 export async function loginWithPassword(username, password) {
-  const identity = resolveLoginIdentity(username);
-  const state = `d-ai-${Date.now()}-${randomName()}`;
-  const query = new URLSearchParams({
-    clientId: authConfig.clientId,
-    responseType: "code",
-    redirectUri: authConfig.redirectUri,
-    type: "code",
-    scope: authConfig.scope,
-    state,
-    nonce: "",
-    code_challenge_method: "",
-    code_challenge: "",
-  });
-
-  const casdoorLogin = await apiPost(`${casdoorBase}`, `/api/login?${query.toString()}`, {
-    username: identity.username,
+  const identity = {
+    ...resolveLoginIdentity(username),
     password,
+  };
+  const signinCode = await getCasdoorLoginCode(identity);
+  const result = await signInCasibaseWithCode(signinCode.code, signinCode.state);
+
+  try {
+    const profileCode = await getCasdoorLoginCode(identity);
+    const accessToken = await exchangeCasdoorToken(profileCode.code);
+    storeCasdoorToken(identity.organization, identity.username, accessToken);
+  } catch {
+    // Chat can still work without the Casdoor API token; profile save will explain the missing token.
+  }
+
+  return result;
+}
+
+export async function registerWithPassword({username, displayName, password}) {
+  const identity = {
+    ...resolveLoginIdentity(username),
+    password,
+  };
+  const state = `d-ai-signup-${Date.now()}-${randomName()}`;
+  const query = authQuery(state);
+  const signup = await apiPost(`${casdoorBase}`, `/api/signup?${query.toString()}`, {
+    username: identity.username,
+    name: displayName || identity.username,
+    password: identity.password,
     organization: identity.organization,
     application: authConfig.application,
-    signinMethod: "Password",
     type: "code",
     language: "",
   });
+  const signupCode = assertOk(signup, "Casdoor registration failed").data;
 
-  assertOk(casdoorLogin, "Casdoor login failed");
+  if (!signupCode) {
+    throw new Error("Casdoor registration did not return a sign-in code.");
+  }
 
-  const signin = await apiPost(
-    `${casibaseBase}`,
-    `/api/signin?code=${encodeURIComponent(casdoorLogin.data)}&state=${encodeURIComponent(state)}`,
-  );
+  const result = await signInCasibaseWithCode(signupCode, state);
 
-  return assertOk(signin, "Casibase sign-in failed");
+  try {
+    const profileCode = await getCasdoorLoginCode(identity);
+    const accessToken = await exchangeCasdoorToken(profileCode.code);
+    storeCasdoorToken(identity.organization, identity.username, accessToken);
+  } catch {
+    // Chat can still work without the Casdoor API token; profile save will explain the missing token.
+  }
+
+  return result;
 }
 
 export async function getAccount() {
   return assertOk(await apiGet(casibaseBase, "/api/get-account"), "Please sign in first").data;
+}
+
+export async function getUserProfile(account) {
+  const id = `${account.owner}/${account.name}`;
+  const accessToken = getStoredCasdoorToken(account.owner, account.name);
+  const headers = accessToken ? {Authorization: `Bearer ${accessToken}`} : {};
+  return assertOk(await apiGet(casdoorBase, `/api/get-user?id=${encodeURIComponent(id)}`, headers), "Failed to load user profile").data;
+}
+
+export async function updateUserProfile(profile, updates) {
+  const id = `${profile.owner}/${profile.name}`;
+  const accessToken = getStoredCasdoorToken(profile.owner, profile.name);
+
+  if (!accessToken) {
+    throw new Error("Please sign out and sign in again before saving your profile.");
+  }
+
+  const query = new URLSearchParams({
+    id,
+    columns: profileColumns.join(","),
+  });
+  const nextProfile = {
+    ...profile,
+    ...updates,
+    password: profile.password || "***",
+    updatedTime: now(),
+  };
+
+  try {
+    await assertOk(
+      await apiPost(casdoorBase, `/api/update-user?${query.toString()}`, nextProfile, {Authorization: `Bearer ${accessToken}`}),
+      "Failed to update user profile",
+    );
+  } catch (error) {
+    if (error.message === "Unauthorized operation") {
+      throw new Error("Profile save was rejected by Casdoor. Please sign out and sign in again, then retry.");
+    }
+    throw error;
+  }
+
+  return nextProfile;
 }
 
 export async function signOut() {
@@ -122,8 +285,9 @@ export async function syncTokenState(account, state) {
 }
 
 export async function getStores() {
-  const result = await apiGet(casibaseBase, "/api/get-stores?owner=admin");
-  return assertOk(result, "Failed to load stores").data || [];
+  const result = await apiGet(casibaseBase, `/api/get-store?id=${encodeURIComponent(sharedStoreId)}`);
+  const store = assertOk(result, "Failed to load shared store").data;
+  return store ? [store] : [];
 }
 
 export async function getChats(account) {
@@ -175,6 +339,22 @@ export async function createChat({account, store}) {
 
   assertOk(await apiPost(casibaseBase, "/api/add-chat", chat), "Failed to create chat");
   return chat;
+}
+
+export async function deleteChat(chat) {
+  assertOk(await apiPost(casibaseBase, "/api/delete-chat", chat), "Failed to delete chat");
+}
+
+export async function updateChat(chat) {
+  const id = `${chat.owner}/${chat.name}`;
+  assertOk(await apiPost(casibaseBase, `/api/update-chat?id=${encodeURIComponent(id)}`, chat), "Failed to update chat");
+  return chat;
+}
+
+export async function updateMessage(message) {
+  const id = `${message.owner}/${message.name}`;
+  assertOk(await apiPost(casibaseBase, `/api/update-message?id=${encodeURIComponent(id)}`, message), "Failed to update message");
+  return message;
 }
 
 export async function sendChatMessage({account, chat, store, text}) {

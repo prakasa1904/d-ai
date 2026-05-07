@@ -244,7 +244,6 @@ export function getTokenLimitStatus(token, usage, pendingTokens = 0, now = new D
       used: stats.all.totalTokens,
       projected: stats.all.totalTokens + Number(pendingTokens || 0),
       limit: limits.totalTokens,
-      required: true,
     },
     {
       key: "requestsPerMinute",

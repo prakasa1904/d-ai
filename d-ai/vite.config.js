@@ -6,9 +6,20 @@ export default defineConfig(({mode}) => {
   const env = loadEnv(mode, process.cwd(), "");
   const casdoorTarget = env.VITE_CASDOOR_TARGET || "http://casdoor.local:8000";
   const casibaseTarget = env.VITE_CASIBASE_TARGET || "http://casibase.local:14000";
+  const sharedStoreId = env.VITE_CASIBASE_SHARED_STORE_ID || "admin/store-built-in";
+  const casdoorClientId = env.VITE_CASDOOR_CLIENT_ID || "ba3a96dbc430c5c6a22b";
+  const casdoorClientSecret = env.VITE_CASDOOR_CLIENT_SECRET || "9228f4ce27971ca5c188cac7489dc0f304a122b6";
+  const casdoorRedirectUri = env.VITE_CASDOOR_REDIRECT_URI || "http://casibase.local:14000/callback";
 
   return {
-    plugins: [react(), dAiApiPlugin({casibaseTarget})],
+    plugins: [react(), dAiApiPlugin({
+      casibaseTarget,
+      casdoorTarget,
+      casdoorClientId,
+      casdoorClientSecret,
+      casdoorRedirectUri,
+      sharedStoreId,
+    })],
     server: {
       host: "0.0.0.0",
       port: Number(env.VITE_PORT || 5173),
