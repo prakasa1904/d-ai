@@ -54,6 +54,9 @@ services:
       driverName: mysql
       dataSourceName: root:123456@tcp(casibase-db:3306)/
       dbName: casibase
+      copyrequestbody: "true"
+      disablePreviewMode: "true"
+      EnableDocs: "true"
 
       casdoorEndpoint: http://casdoor.local:8000
       clientId: ba3a96dbc430c5c6a22b
