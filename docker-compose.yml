@@ -1,0 +1,71 @@
+services:
+  casdoor-db:
+    image: mysql:8.0
+    container_name: casdoor-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456
+      MYSQL_DATABASE: casdoor
+    command:
+      - --default-authentication-plugin=mysql_native_password
+    volumes:
+      - casdoor_db_data:/var/lib/mysql
+    ports:
+      - "3307:3306"
+
+  casdoor:
+    image: casbin/casdoor:latest
+    container_name: casdoor
+    restart: unless-stopped
+    depends_on:
+      - casdoor-db
+    entrypoint: /bin/sh -c './server --createDatabase=true'
+    environment:
+      RUNNING_IN_DOCKER: "true"
+    volumes:
+      - ./conf/casdoor:/conf
+    ports:
+      - "8000:8000"
+
+  casibase-db:
+    image: mysql:8.0
+    container_name: casibase-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456
+      MYSQL_DATABASE: casibase
+    command:
+      - --default-authentication-plugin=mysql_native_password
+    volumes:
+      - casibase_db_data:/var/lib/mysql
+    ports:
+      - "3308:3306"
+
+  casibase:
+    image: casbin/casibase:latest
+    container_name: casibase
+    restart: unless-stopped
+    depends_on:
+      - casibase-db
+      - casdoor
+    extra_hosts:
+      - "casdoor.local:host-gateway"
+    environment:
+      driverName: mysql
+      dataSourceName: root:123456@tcp(casibase-db:3306)/
+      dbName: casibase
+
+      casdoorEndpoint: http://casdoor.local:8000
+      clientId: ba3a96dbc430c5c6a22b
+      clientSecret: 9228f4ce27971ca5c188cac7489dc0f304a122b6
+      casdoorOrganization: built-in
+      casdoorApplication: casibase
+      redirectPath: /callback
+    volumes:
+      - ./conf/casibase:/conf
+    ports:
+      - "14000:14000"
+
+volumes:
+  casdoor_db_data:
+  casibase_db_data:
