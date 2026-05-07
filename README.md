@@ -162,6 +162,16 @@ Profile updates require a Casdoor access token. New logins obtain it automatical
 
 Casibase can still generate its own chat titles, such as `New Chat - 1`, after a conversation is created. Use the sidebar rename or delete actions to manage those chat history entries.
 
+## Model Provider Versioning
+
+Treat Casibase provider names as stable IDs after users start chatting. Casibase persists the provider name on chat and message rows, so renaming or deleting a provider that already has history can break old conversations with errors such as:
+
+```text
+The model provider: dummy-model-provider is not found
+```
+
+For model changes, create a new provider record, for example `ifm-v2`, and point the shared store to that new provider. Keep the old provider record available while old chats still exist, or migrate old chat/message rows intentionally. D-AI repairs stale chat history to the current store provider before sending, but the safest operational pattern is provider versioning instead of renaming an in-use provider.
+
 ## Token Limits
 
 Token quotas are optional when creating a token. Leave the quota blank, or set any limit to `0`, when you do not want that cap:

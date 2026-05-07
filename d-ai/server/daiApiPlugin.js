@@ -375,6 +375,7 @@ async function createChat(client, account, store, sessionCookie) {
 }
 
 async function sendChatMessage(client, {account, chat, store, promptText, sessionCookie}) {
+  const modelProvider = store?.modelProvider || chat.modelProvider || "";
   const message = {
     owner: "admin",
     name: `message_dai_api_${randomName()}`,
@@ -392,11 +393,11 @@ async function sendChatMessage(client, {account, chat, store, promptText, sessio
     isRegenerated: false,
     fileName: "",
     webSearchEnabled: false,
-    modelProvider: chat.modelProvider || store?.modelProvider || "",
+    modelProvider,
   };
 
   const result = await client.post("/api/add-message", message, sessionCookie);
-  return assertCasibaseOk(result, "Failed to send message").data || chat;
+  return assertCasibaseOk(result, "Failed to send message").data || {...chat, modelProvider};
 }
 
 async function getMessages(client, chat, sessionCookie) {

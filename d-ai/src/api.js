@@ -358,14 +358,28 @@ export async function updateMessage(message) {
 }
 
 export async function sendChatMessage({account, chat, store, text}) {
+  const modelProvider = store?.modelProvider || chat.modelProvider || "";
+  const storeName = store?.name || chat.store || "";
+  let activeChat = chat;
+
+  if ((modelProvider && chat.modelProvider !== modelProvider) || (storeName && chat.store !== storeName)) {
+    activeChat = {
+      ...chat,
+      store: storeName,
+      modelProvider,
+      updatedTime: now(),
+    };
+    await updateChat(activeChat);
+  }
+
   const message = {
     owner: "admin",
     name: `message_dai_${randomName()}`,
     createdTime: now(),
     organization: account.owner,
-    store: chat.store || store?.name || "",
+    store: storeName,
     user: account.name,
-    chat: chat.name,
+    chat: activeChat.name,
     replyTo: "",
     author: account.name,
     text,
@@ -375,11 +389,16 @@ export async function sendChatMessage({account, chat, store, text}) {
     isRegenerated: false,
     fileName: "",
     webSearchEnabled: false,
-    modelProvider: chat.modelProvider || store?.modelProvider || "",
+    modelProvider,
   };
 
   const result = await apiPost(casibaseBase, "/api/add-message", message);
-  return assertOk(result, "Failed to send message").data || chat;
+  const updatedChat = assertOk(result, "Failed to send message").data || activeChat;
+  return {
+    ...updatedChat,
+    store: storeName,
+    modelProvider,
+  };
 }
 
 export async function getMessages(chat) {
