@@ -134,8 +134,13 @@ D-AI also adds local Vite middleware routes:
 ```text
 /api/d-ai/casdoor-token       Exchanges a Casdoor OAuth code for a profile access token
 /api/d-ai/upload-file         Uploads chat attachments into the configured Casibase store
-/api/d-ai/token-state         Syncs browser-created D-AI tokens into the local API layer
-/api/v1/chat/completions      OpenAI-compatible chat endpoint
+/api/d-ai/token-state         Reads or bootstraps the signed-in user's D-AI token state
+/api/d-ai/token-action        Mutates tokens, limits, status, deletion, and usage on the server side
+/api/d-ai/token-limit-check   Checks current server-side limits before browser chat sends to Casibase
+/api/v1/models                Lists the D-AI OpenAI-compatible model ID
+/api/v1/histories             Lists API histories for the bearer token
+/api/v1/history               Gets one API history by key, including messages when available
+/api/v1/chat/completions      OpenAI-compatible chat endpoint with stable history-key support
 ```
 
 Optional `.env.local` overrides:
@@ -177,7 +182,7 @@ Restart `npm run dev` after changing `vite.config.js`, server middleware, or `.e
 - Login page: sign in with a Casdoor user or register a new `ifm` user without exposing the organization field.
 - Chat page: create new chats, upload image attachments into the selected Casibase store, forward image metadata into prompts, open history, rename chats, delete chats, and stop or steer an active streaming response.
 - Dashboard page: view signed-in user chat and message usage.
-- Tokens page: create/copy/delete/activate/deactivate D-AI tokens, view token usage, inspect time-series usage, and configure optional rate limits.
+- Tokens page: create/copy/delete/activate/deactivate D-AI tokens, monitor request success rate, failed requests, failure breakdown, token usage, and configure optional server-side rate limits.
 - Profile page: update Casdoor profile fields such as display name, avatar, contact info, work info, preferences, and bio.
 
 Profile updates require a Casdoor access token. New logins obtain it automatically. If you were already signed in before this feature was added, open `Profile`, enter your current password in `Confirm Access`, and save again.
@@ -185,6 +190,12 @@ Profile updates require a Casdoor access token. New logins obtain it automatical
 Casibase can still generate its own chat titles, such as `New Chat - 1`, after a conversation is created. Use the sidebar rename or delete actions to manage those chat history entries.
 
 Chat attachments are intentionally limited to images in D-AI. Casibase's document/vector indexer does not support image extensions such as `.jpeg`, so D-AI stores the image and sends image metadata/URL context to the chat instead of treating the upload as a text document. Image understanding still depends on the selected Casibase model provider: use a vision-capable model, and make sure the image URL is reachable by that model runtime.
+
+D-AI token limits, usage, and request-attempt monitoring are server-authoritative in the local middleware. The browser keeps a local cache for fast rendering, but token creation, limit edits, activation, deletion, usage recording, failed request recording, and pre-chat limit checks go through `/api/d-ai/*` routes. This prevents stale browser state from silently overriding updated limits.
+
+For `/api/v1/chat/completions`, reuse the same `X-D-AI-History-Key` header to append requests to the same Casibase chat history. If the header is omitted, D-AI uses `default`, so each token has one stable default API conversation. Use a different history key only when you want a separate API conversation.
+
+For CLI behavior such as `openclaw`, see [API History For CLI Apps](docs/api-history-for-cli-apps.md).
 
 ## Model Provider Versioning
 
@@ -342,11 +353,25 @@ Example:
 curl 'http://localhost:5174/api/v1/chat/completions' \
   -H 'Authorization: Bearer <D_AI_TOKEN>' \
   -H 'Content-Type: application/json' \
+  -H 'X-D-AI-History-Key: openclaw:casibase:debug-login' \
   --data '{
     "model": "d-ai-casibase",
     "messages": [{"role": "user", "content": "Hello from D-AI"}],
     "stream": true
   }'
+```
+
+For CLI clients, use a new `X-D-AI-History-Key` per task or session, and reuse it when the user continues the same task. API clients can discover the available model and token histories:
+
+```bash
+curl 'http://localhost:5174/api/v1/models' \
+  -H 'Authorization: Bearer <D_AI_TOKEN>'
+
+curl 'http://localhost:5174/api/v1/histories' \
+  -H 'Authorization: Bearer <D_AI_TOKEN>'
+
+curl 'http://localhost:5174/api/v1/history?key=openclaw%3Acasibase%3Adebug-login' \
+  -H 'Authorization: Bearer <D_AI_TOKEN>'
 ```
 
 Tokens are synced from the browser into the local Vite API layer after sign-in. If a new token is rejected by curl, refresh D-AI once while signed in and try again.

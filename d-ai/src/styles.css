@@ -621,43 +621,6 @@ textarea:focus {
   grid-column: span 3;
 }
 
-.daily-chart {
-  height: 170px;
-  display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
-  align-items: end;
-  gap: 10px;
-  overflow-x: auto;
-  padding-bottom: 4px;
-}
-
-.daily-column {
-  height: 100%;
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto auto;
-  gap: 6px;
-  justify-items: center;
-}
-
-.daily-bar {
-  width: 100%;
-  max-width: 28px;
-  align-self: end;
-  border-radius: 8px 8px 3px 3px;
-  background: #137966;
-}
-
-.daily-column strong {
-  color: #17211f;
-  font-size: 0.82rem;
-}
-
-.daily-column span {
-  color: #66736d;
-  font-size: 0.74rem;
-  font-weight: 800;
-}
-
 .usage-bars {
   display: grid;
   gap: 14px;
@@ -862,6 +825,14 @@ textarea:focus {
   gap: 10px;
 }
 
+.token-management-actions {
+  flex: 1 1 760px;
+}
+
+.token-management-actions .token-form {
+  flex: 1 1 520px;
+}
+
 .token-form .primary-button {
   height: 44px;
 }
@@ -872,6 +843,13 @@ textarea:focus {
 
 .token-timeseries-section {
   min-height: 330px;
+}
+
+.monitoring-grid,
+.token-insight-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
 }
 
 .limit-grid {
@@ -934,6 +912,12 @@ textarea:focus {
   gap: 12px;
 }
 
+.limit-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+}
+
 .api-reference-section {
   min-height: auto;
 }
@@ -975,6 +959,22 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.api-note {
+  padding: 12px;
+  border: 1px solid #dbe1d4;
+  border-radius: 8px;
+  background: #f6f7f4;
+  color: #44504b;
+  font-size: 0.88rem;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.api-note code {
+  color: #17211f;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 .curl-block {
   display: grid;
   gap: 10px;
@@ -996,76 +996,144 @@ textarea:focus {
   width: min(100%, 220px);
 }
 
-.token-timeseries {
-  height: 210px;
-  display: grid;
-  grid-template-columns: repeat(14, minmax(24px, 1fr));
-  align-items: end;
-  gap: 9px;
-  padding-top: 10px;
-}
-
-.token-time-column {
-  height: 100%;
-  min-width: 0;
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto auto;
-  gap: 6px;
-  justify-items: center;
-  position: relative;
-}
-
-.token-stack {
+.line-chart-scroll {
   width: 100%;
-  max-width: 34px;
-  min-height: 0;
-  align-self: end;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  border-radius: 8px 8px 3px 3px;
-  background: #edf2ed;
+  overflow-x: auto;
 }
 
-.token-stack-prompt,
-.token-stack-response {
+.line-chart {
   width: 100%;
+  min-width: 560px;
+  height: 240px;
+  display: block;
 }
 
-.token-stack-prompt {
-  background: #137966;
+.line-chart-grid {
+  stroke: #e8eee6;
+  stroke-width: 1;
 }
 
-.token-stack-response {
-  background: #bd702c;
-}
-
-.request-marker {
-  width: 3px;
-  min-height: 0;
-  max-height: 100%;
-  position: absolute;
-  right: calc(50% - 24px);
-  bottom: 42px;
-  border-radius: 999px;
-  background: #44504b;
-}
-
-.token-time-column strong {
-  color: #17211f;
-  font-size: 0.75rem;
-}
-
-.token-time-column span {
-  overflow: hidden;
-  width: 100%;
-  color: #66736d;
-  font-size: 0.68rem;
+.line-chart-y-label,
+.line-chart-x-label {
+  fill: #66736d;
+  font-size: 0.7rem;
   font-weight: 800;
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.line-chart-y-label {
+  text-anchor: end;
+}
+
+.line-chart-x-label {
+  text-anchor: middle;
+}
+
+.line-chart-line {
+  fill: none;
+  stroke: #137966;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.line-chart-dot {
+  fill: #ffffff;
+  stroke: #137966;
+  stroke-width: 2;
+}
+
+.line-chart-hit-dot {
+  fill: transparent;
+  stroke: transparent;
+  pointer-events: all;
+}
+
+.line-prompt {
+  stroke: #137966;
+}
+
+.line-response {
+  stroke: #bd702c;
+}
+
+.line-requests {
+  stroke: #44504b;
+}
+
+.line-success,
+.line-activity {
+  stroke: #137966;
+}
+
+.line-failed {
+  stroke: #9c3d1d;
+}
+
+.line-status-0 {
+  stroke: #9c3d1d;
+}
+
+.line-status-1 {
+  stroke: #bd702c;
+}
+
+.line-status-2 {
+  stroke: #5d6f99;
+}
+
+.line-status-3 {
+  stroke: #7b5f9e;
+}
+
+.line-status-4 {
+  stroke: #2f7f89;
+}
+
+.line-status-5 {
+  stroke: #44504b;
+}
+
+.line-chart-dot.line-prompt,
+.line-chart-dot.line-success,
+.line-chart-dot.line-activity {
+  stroke: #137966;
+}
+
+.line-chart-dot.line-response {
+  stroke: #bd702c;
+}
+
+.line-chart-dot.line-requests {
+  stroke: #44504b;
+}
+
+.line-chart-dot.line-failed {
+  stroke: #9c3d1d;
+}
+
+.line-chart-dot.line-status-0 {
+  stroke: #9c3d1d;
+}
+
+.line-chart-dot.line-status-1 {
+  stroke: #bd702c;
+}
+
+.line-chart-dot.line-status-2 {
+  stroke: #5d6f99;
+}
+
+.line-chart-dot.line-status-3 {
+  stroke: #7b5f9e;
+}
+
+.line-chart-dot.line-status-4 {
+  stroke: #2f7f89;
+}
+
+.line-chart-dot.line-status-5 {
+  stroke: #44504b;
 }
 
 .chart-legend {
@@ -1098,6 +1166,30 @@ textarea:focus {
 }
 
 .legend-requests {
+  background: #44504b;
+}
+
+.chart-legend .line-status-0 {
+  background: #9c3d1d;
+}
+
+.chart-legend .line-status-1 {
+  background: #bd702c;
+}
+
+.chart-legend .line-status-2 {
+  background: #5d6f99;
+}
+
+.chart-legend .line-status-3 {
+  background: #7b5f9e;
+}
+
+.chart-legend .line-status-4 {
+  background: #2f7f89;
+}
+
+.chart-legend .line-status-5 {
   background: #44504b;
 }
 
@@ -1190,7 +1282,16 @@ textarea:focus {
 }
 
 .token-usage-row {
-  grid-template-columns: minmax(0, 1fr) 120px minmax(0, 1fr) 160px;
+  grid-template-columns: minmax(0, 1fr) 90px minmax(160px, 1fr) minmax(120px, 180px) 120px;
+}
+
+.request-success {
+  border-color: #d6eadf;
+}
+
+.request-failed {
+  border-color: #f1c0ad;
+  background: #fff8f5;
 }
 
 .empty-state {
@@ -1480,6 +1581,8 @@ textarea:focus {
 
   .stats-grid,
   .dashboard-grid,
+  .monitoring-grid,
+  .token-insight-grid,
   .limit-grid,
   .limit-editor,
   .profile-auth-card,
@@ -1502,12 +1605,6 @@ textarea:focus {
   .api-grid,
   .api-field {
     grid-template-columns: 1fr;
-  }
-
-  .token-timeseries {
-    grid-template-columns: repeat(7, minmax(28px, 1fr));
-    height: 260px;
-    overflow-x: auto;
   }
 
   .token-chart-heading {

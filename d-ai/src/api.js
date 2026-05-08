@@ -25,7 +25,7 @@ async function readJson(response) {
   }
 
   if (!response.ok) {
-    throw new Error(payload?.msg || `${response.status} ${response.statusText}`);
+    throw new Error(payload?.msg || payload?.error?.message || `${response.status} ${response.statusText}`);
   }
 
   return payload;
@@ -292,6 +292,21 @@ export async function signOut() {
 export async function syncTokenState(account, state) {
   const result = await apiPost("", "/api/d-ai/token-state", {account, state});
   return assertOk(result, "Failed to sync token state").data || state;
+}
+
+export async function getServerTokenState() {
+  const result = await apiGet("", "/api/d-ai/token-state");
+  return assertOk(result, "Failed to load token state").data;
+}
+
+export async function mutateTokenState(action, payload = {}) {
+  const result = await apiPost("", "/api/d-ai/token-action", {action, ...payload});
+  return assertOk(result, "Failed to update token state").data;
+}
+
+export async function checkTokenLimit({tokenId, promptText, pendingTokens}) {
+  const result = await apiPost("", "/api/d-ai/token-limit-check", {tokenId, promptText, pendingTokens});
+  return assertOk(result, "Token limit exceeded").data;
 }
 
 export async function getStores() {

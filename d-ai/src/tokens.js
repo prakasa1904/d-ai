@@ -5,6 +5,7 @@ export function emptyTokenState() {
     version: 1,
     tokens: [],
     usage: [],
+    requestEvents: [],
   };
 }
 
@@ -59,6 +60,7 @@ export function loadTokenState(account) {
       ...parsed,
       tokens: Array.isArray(parsed?.tokens) ? parsed.tokens.map(normalizeToken) : [],
       usage: Array.isArray(parsed?.usage) ? parsed.usage : [],
+      requestEvents: Array.isArray(parsed?.requestEvents) ? parsed.requestEvents : [],
     };
   } catch {
     return emptyTokenState();

@@ -1,13 +1,16 @@
 import {useEffect, useMemo, useRef, useState} from "react";
 import {
   chooseStore,
+  checkTokenLimit,
   createChat,
   deleteChat,
   getAccount,
   getChats,
   getMessages,
+  getServerTokenState,
   getStores,
   loginWithPassword,
+  mutateTokenState,
   openAnswerStream,
   registerWithPassword,
   sendChatMessage,
@@ -22,7 +25,6 @@ import {
   updateUserProfile,
 } from "./api";
 import {
-  createTokenRecord,
   createUsageRecord,
   emptyTokenState,
   estimateTokenCount,
@@ -318,6 +320,218 @@ function buildTokenUsageSeries(usage, days = 14) {
   return series;
 }
 
+function localHourKey(date) {
+  return [
+    localDateKey(date),
+    String(date.getHours()).padStart(2, "0"),
+  ].join("T");
+}
+
+function buildMonitoringBuckets(days) {
+  if (days === 1) {
+    const start = startOfToday();
+    return Array.from({length: 24}, (_, hour) => {
+      const date = new Date(start);
+      date.setHours(hour, 0, 0, 0);
+      return {
+        key: localHourKey(date),
+        label: new Intl.DateTimeFormat(undefined, {hour: "2-digit"}).format(date),
+        success: 0,
+        failed: 0,
+        total: 0,
+        successRate: null,
+      };
+    });
+  }
+
+  const today = startOfToday();
+  return Array.from({length: days}, (_, index) => {
+    const offset = days - 1 - index;
+    const date = new Date(today);
+    date.setDate(today.getDate() - offset);
+    return {
+      key: localDateKey(date),
+      label: new Intl.DateTimeFormat(undefined, days <= 7 ? {weekday: "short"} : {month: "short", day: "numeric"}).format(date),
+      success: 0,
+      failed: 0,
+      total: 0,
+      successRate: null,
+    };
+  });
+}
+
+function buildTokenRequestEvents(tokenData) {
+  const events = Array.isArray(tokenData.requestEvents) ? tokenData.requestEvents : [];
+  const usageWithEvents = new Set(events.map((event) => event.usageId).filter(Boolean));
+  const syntheticSuccessEvents = (tokenData.usage || [])
+    .filter((entry) => entry.id && !usageWithEvents.has(entry.id))
+    .map((entry) => ({
+      id: `synthetic_${entry.id}`,
+      tokenId: entry.tokenId,
+      createdAt: entry.createdAt,
+      status: "success",
+      source: "usage",
+      httpStatus: 200,
+      errorType: "",
+      errorMessage: "",
+      failureStage: "",
+      promptTokens: Number(entry.promptTokens || 0),
+      responseTokens: Number(entry.responseTokens || 0),
+      totalTokens: Number(entry.totalTokens || 0),
+      latencyMs: 0,
+      chatName: entry.chatName || "",
+      chatTitle: entry.chatTitle || "",
+      modelProvider: entry.modelProvider || "",
+      usageId: entry.id,
+      isSynthetic: true,
+    }));
+
+  return [...events, ...syntheticSuccessEvents];
+}
+
+function buildTokenRequestSeries(events, days) {
+  const series = buildMonitoringBuckets(days);
+  const byKey = new Map(series.map((bucket) => [bucket.key, bucket]));
+
+  events.forEach((event) => {
+    const date = new Date(event.createdAt || "");
+    if (Number.isNaN(date.getTime())) {
+      return;
+    }
+
+    const bucket = byKey.get(days === 1 ? localHourKey(date) : localDateKey(date));
+    if (!bucket) {
+      return;
+    }
+
+    if (event.status === "success") {
+      bucket.success += 1;
+    } else {
+      bucket.failed += 1;
+    }
+    bucket.total += 1;
+  });
+
+  return series.map((bucket) => ({
+    ...bucket,
+    successRate: bucket.total > 0 ? (bucket.success / bucket.total) * 100 : null,
+  }));
+}
+
+function statusCodeKey(statusCode) {
+  const value = String(statusCode || "unknown").trim() || "unknown";
+  return `status_${value.replace(/[^a-zA-Z0-9]/g, "_")}`;
+}
+
+function statusCodeLabel(statusCode) {
+  const value = String(statusCode || "unknown").trim();
+  return value ? `HTTP ${value}` : "Unknown status";
+}
+
+function buildFailedStatusSeries(events, days) {
+  const series = buildMonitoringBuckets(days);
+  const byKey = new Map(series.map((bucket) => [bucket.key, bucket]));
+  const statusCodes = new Set();
+
+  events
+    .filter((event) => event.status !== "success")
+    .forEach((event) => {
+      const date = new Date(event.createdAt || "");
+      if (Number.isNaN(date.getTime())) {
+        return;
+      }
+
+      const bucket = byKey.get(days === 1 ? localHourKey(date) : localDateKey(date));
+      if (!bucket) {
+        return;
+      }
+
+      const statusCode = event.httpStatus || "unknown";
+      const key = statusCodeKey(statusCode);
+      statusCodes.add(String(statusCode));
+      bucket[key] = Number(bucket[key] || 0) + 1;
+    });
+
+  const sortedStatusCodes = [...statusCodes].sort((left, right) => {
+    const leftNumber = Number(left);
+    const rightNumber = Number(right);
+    if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+      return leftNumber - rightNumber;
+    }
+    return left.localeCompare(right);
+  });
+  const lines = sortedStatusCodes.map((statusCode, index) => ({
+    key: statusCodeKey(statusCode),
+    label: statusCodeLabel(statusCode),
+    className: `line-status-${index % 6}`,
+  }));
+
+  return {series, lines};
+}
+
+function summarizeRequestEvents(events) {
+  const summary = events.reduce((result, event) => {
+    result.total += 1;
+    if (event.status === "success") {
+      result.success += 1;
+    } else {
+      result.failed += 1;
+    }
+    return result;
+  }, {total: 0, success: 0, failed: 0});
+
+  return {
+    ...summary,
+    successRate: summary.total > 0 ? (summary.success / summary.total) * 100 : null,
+  };
+}
+
+function summarizeRequestsByToken(events) {
+  return events.reduce((result, event) => {
+    if (!result[event.tokenId]) {
+      result[event.tokenId] = {
+        total: 0,
+        success: 0,
+        failed: 0,
+        successRate: null,
+        lastSuccessAt: "",
+        lastFailureAt: "",
+        lastFailureReason: "",
+      };
+    }
+
+    const item = result[event.tokenId];
+    item.total += 1;
+    if (event.status === "success") {
+      item.success += 1;
+      if (!item.lastSuccessAt || event.createdAt > item.lastSuccessAt) {
+        item.lastSuccessAt = event.createdAt;
+      }
+    } else {
+      item.failed += 1;
+      if (!item.lastFailureAt || event.createdAt > item.lastFailureAt) {
+        item.lastFailureAt = event.createdAt;
+        item.lastFailureReason = event.errorMessage || event.errorType || event.failureStage || "Failed";
+      }
+    }
+    item.successRate = item.total > 0 ? (item.success / item.total) * 100 : null;
+
+    return result;
+  }, {});
+}
+
+function failureBreakdown(events, limit = 6) {
+  const counts = countBy(
+    events.filter((event) => event.status !== "success"),
+    (event) => event.errorType || event.failureStage || "unknown",
+  );
+  return topEntries(counts, limit);
+}
+
+function formatPercent(value) {
+  return value === null || value === undefined ? "No traffic" : `${value.toFixed(value >= 99.95 || value < 10 ? 1 : 0)}%`;
+}
+
 function AppHeader({currentPath, onNavigate, onLogout, onNewChat}) {
   const eyebrow = currentPath === "/dashboard"
     ? "User usage"
@@ -550,30 +764,92 @@ function UsageBreakdown({title, entries}) {
   );
 }
 
-function DailyActivity({days, title}) {
-  const max = Math.max(1, ...days.map((day) => day.count));
+function TimeseriesLineChart({series, lines, maxValue, valueFormatter = (value) => value.toLocaleString()}) {
+  const width = 720;
+  const height = 240;
+  const padding = {top: 18, right: 20, bottom: 34, left: 46};
+  const chartWidth = width - padding.left - padding.right;
+  const chartHeight = height - padding.top - padding.bottom;
+  const values = series.flatMap((item) => lines.map((line) => Number(item[line.key] || 0)));
+  const max = Math.max(1, Number(maxValue || 0), ...values);
+  const labelEvery = Math.max(1, Math.ceil(series.length / 8));
 
+  function pointFor(item, index, key) {
+    const value = Number(item[key] || 0);
+    const x = padding.left + (series.length <= 1 ? chartWidth / 2 : (index / (series.length - 1)) * chartWidth);
+    const y = padding.top + chartHeight - (value / max) * chartHeight;
+    return {x, y, value};
+  }
+
+  return (
+    <div className="line-chart-scroll">
+      <svg className="line-chart" role="img" viewBox={`0 0 ${width} ${height}`}>
+        {[0, 0.5, 1].map((tick) => {
+          const y = padding.top + chartHeight - tick * chartHeight;
+          const value = max * tick;
+
+          return (
+            <g key={tick}>
+              <line className="line-chart-grid" x1={padding.left} x2={width - padding.right} y1={y} y2={y} />
+              <text className="line-chart-y-label" x={padding.left - 10} y={y + 4}>{valueFormatter(value)}</text>
+            </g>
+          );
+        })}
+
+        {lines.map((line) => {
+          const points = series.map((item, index) => pointFor(item, index, line.key));
+          const path = points.map((point) => `${point.x},${point.y}`).join(" ");
+
+          return (
+            <g key={line.key}>
+              <polyline className={`line-chart-line ${line.className || ""}`} points={path} />
+              {points.map((point, index) => (
+                <g key={`${line.key}-${series[index].key}`}>
+                  {series.length <= 30 ? (
+                    <circle
+                      className={`line-chart-dot ${line.className || ""}`}
+                      cx={point.x}
+                      cy={point.y}
+                      r="3"
+                    />
+                  ) : null}
+                  <circle className="line-chart-hit-dot" cx={point.x} cy={point.y} r="8">
+                    <title>{`${series[index].label}: ${line.label} ${valueFormatter(point.value)}`}</title>
+                  </circle>
+                </g>
+              ))}
+            </g>
+          );
+        })}
+
+        {series.map((item, index) => {
+          if (index !== 0 && index !== series.length - 1 && index % labelEvery !== 0) {
+            return null;
+          }
+
+          const x = padding.left + (series.length <= 1 ? chartWidth / 2 : (index / (series.length - 1)) * chartWidth);
+          return <text className="line-chart-x-label" key={item.key} x={x} y={height - 8}>{item.label}</text>;
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function DailyActivity({days, title}) {
   return (
     <section className="dashboard-section">
       <div className="section-heading">
         <h2>{title}</h2>
       </div>
-      <div className="daily-chart" style={{gridTemplateColumns: `repeat(${days.length}, minmax(14px, 1fr))`}}>
-        {days.map((day) => (
-          <div className="daily-column" key={day.key}>
-            <div className="daily-bar" style={{height: `${Math.max(8, (day.count / max) * 100)}%`}} />
-            <strong>{day.count}</strong>
-            <span>{day.label}</span>
-          </div>
-        ))}
-      </div>
+      <TimeseriesLineChart
+        lines={[{key: "count", label: "Messages", className: "line-activity"}]}
+        series={days}
+      />
     </section>
   );
 }
 
-function TokenUsageTimeseries({series, tokens, selectedTokenId, onSelectedTokenId}) {
-  const maxTokens = Math.max(1, ...series.map((day) => day.totalTokens));
-  const maxRequests = Math.max(1, ...series.map((day) => day.requests));
+function TokenUsageTimeseries({periodLabelText, series, tokens, selectedTokenId, onSelectedTokenId}) {
   const totals = series.reduce((result, day) => ({
     requests: result.requests + day.requests,
     totalTokens: result.totalTokens + day.totalTokens,
@@ -587,7 +863,7 @@ function TokenUsageTimeseries({series, tokens, selectedTokenId, onSelectedTokenI
         <div>
           <h2>Token Usage Over Time</h2>
           <p className="side-note">
-            {totals.requests} requests · {totals.totalTokens} tokens · {totals.promptTokens} prompt · {totals.responseTokens} response
+            {periodLabelText} · {totals.requests} requests · {totals.totalTokens} tokens · {totals.promptTokens} prompt · {totals.responseTokens} response
           </p>
         </div>
         <select value={selectedTokenId} onChange={(event) => onSelectedTokenId(event.target.value)}>
@@ -601,24 +877,14 @@ function TokenUsageTimeseries({series, tokens, selectedTokenId, onSelectedTokenI
       {totals.requests === 0 ? (
         <p className="side-note">No token usage in this time window yet.</p>
       ) : (
-        <div className="token-timeseries">
-          {series.map((day) => {
-            const promptPercent = day.totalTokens > 0 ? (day.promptTokens / day.totalTokens) * 100 : 0;
-            const responsePercent = day.totalTokens > 0 ? (day.responseTokens / day.totalTokens) * 100 : 0;
-
-            return (
-              <div className="token-time-column" key={day.key} title={`${day.label}: ${day.requests} requests, ${day.totalTokens} tokens`}>
-                <div className="request-marker" style={{height: `${day.requests > 0 ? Math.max(6, (day.requests / maxRequests) * 100) : 0}%`}} />
-                <div className="token-stack" style={{height: `${Math.max(day.totalTokens > 0 ? 10 : 0, (day.totalTokens / maxTokens) * 100)}%`}}>
-                  <div className="token-stack-response" style={{height: `${responsePercent}%`}} />
-                  <div className="token-stack-prompt" style={{height: `${promptPercent}%`}} />
-                </div>
-                <strong>{day.totalTokens}</strong>
-                <span>{day.label}</span>
-              </div>
-            );
-          })}
-        </div>
+        <TimeseriesLineChart
+          lines={[
+            {key: "promptTokens", label: "Prompt tokens", className: "line-prompt"},
+            {key: "responseTokens", label: "Response tokens", className: "line-response"},
+            {key: "requests", label: "Requests", className: "line-requests"},
+          ]}
+          series={series}
+        />
       )}
 
       <div className="chart-legend">
@@ -630,6 +896,54 @@ function TokenUsageTimeseries({series, tokens, selectedTokenId, onSelectedTokenI
   );
 }
 
+function TokenRequestMonitoring({failureStatusLines, failureStatusSeries, periodLabelText, series}) {
+  const totals = series.reduce((result, bucket) => ({
+    total: result.total + bucket.total,
+    success: result.success + bucket.success,
+    failed: result.failed + bucket.failed,
+  }), {total: 0, success: 0, failed: 0});
+
+  return (
+    <div className="monitoring-grid">
+      <section className="dashboard-section token-section">
+        <div className="section-heading">
+          <div>
+            <h2>Request Success Rate</h2>
+            <p className="side-note">{periodLabelText} · {formatPercent(totals.total ? (totals.success / totals.total) * 100 : null)} overall</p>
+          </div>
+        </div>
+        <TimeseriesLineChart
+          lines={[{key: "successRate", label: "Success rate", className: "line-success"}]}
+          maxValue={100}
+          series={series.map((bucket) => ({...bucket, successRate: bucket.successRate ?? 0}))}
+          valueFormatter={(value) => `${Math.round(value)}%`}
+        />
+      </section>
+
+      <section className="dashboard-section token-section">
+        <div className="section-heading">
+          <div>
+            <h2>Failed Requests</h2>
+            <p className="side-note">{periodLabelText} · {totals.failed} failed of {totals.total} attempts</p>
+          </div>
+        </div>
+        {failureStatusLines.length ? (
+          <>
+            <TimeseriesLineChart lines={failureStatusLines} series={failureStatusSeries} />
+            <div className="chart-legend">
+              {failureStatusLines.map((line) => (
+                <span key={line.key}><i className={line.className} /> {line.label}</span>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p className="side-note">No failed requests in this time window yet.</p>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function ApiReference({token, onCopy}) {
   const reference = useMemo(() => {
     const origin = window.location.origin;
@@ -637,16 +951,20 @@ function ApiReference({token, onCopy}) {
     const chatUrl = `${baseUrl}/chat/completions`;
     const model = "d-ai-casibase";
     const bearer = token?.value || "<TOKEN>";
+    const historyKey = "default";
 
     return {
       baseUrl,
       chatUrl,
       casibaseUrl: `${origin}/casibase`,
       model,
+      historyKey,
       authHeader: `Authorization: Bearer ${bearer}`,
+      historyHeader: `X-D-AI-History-Key: ${historyKey}`,
       curl: [
         `curl '${chatUrl}' \\`,
         `  -H 'Authorization: Bearer ${bearer}' \\`,
+        `  -H 'X-D-AI-History-Key: ${historyKey}' \\`,
         "  -H 'Content-Type: application/json' \\",
         "  --data '{",
         `    \"model\": \"${model}\",`,
@@ -662,7 +980,7 @@ function ApiReference({token, onCopy}) {
       <div className="section-heading">
         <div>
           <h2>Custom Model API</h2>
-          <p className="side-note">Use an active D-AI token as a bearer token for this custom model endpoint.</p>
+          <p className="side-note">Use an active D-AI token and a stable history key to keep requests in the same Casibase chat.</p>
         </div>
       </div>
 
@@ -688,10 +1006,24 @@ function ApiReference({token, onCopy}) {
           <button className="small-button" onClick={() => onCopy("Auth header", reference.authHeader)}>Copy</button>
         </div>
         <div className="api-field">
+          <span>History Header</span>
+          <code>{reference.historyHeader}</code>
+          <button className="small-button" onClick={() => onCopy("History header", reference.historyHeader)}>Copy</button>
+        </div>
+        <div className="api-field">
+          <span>History Key</span>
+          <code>{reference.historyKey}</code>
+          <button className="small-button" onClick={() => onCopy("History key", reference.historyKey)}>Copy</button>
+        </div>
+        <div className="api-field">
           <span>Casibase Proxy Base</span>
           <code>{reference.casibaseUrl}</code>
           <button className="small-button" onClick={() => onCopy("Casibase proxy base", reference.casibaseUrl)}>Copy</button>
         </div>
+      </div>
+
+      <div className="api-note">
+        Reuse the same history key on every request to append to the same Casibase chat history. Omitting the header uses <code>default</code>; change the key only when you want a separate API conversation.
       </div>
 
       <div className="curl-block">
@@ -730,16 +1062,46 @@ function RateLimitTracker({tokenData, selectedTokenId, onSelectedTokenId, onUpda
   const token = tokenData.tokens.find((item) => item.id === selectedTokenId) || tokenData.tokens[0];
   const status = useMemo(() => getTokenLimitStatus(token, tokenData.usage), [token, tokenData.usage]);
   const limits = token?.limits || {};
+  const [draftLimits, setDraftLimits] = useState(normalizeTokenLimits(limits));
+  const [saveError, setSaveError] = useState("");
+  const [saveNotice, setSaveNotice] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    setDraftLimits(normalizeTokenLimits(token?.limits));
+    setSaveError("");
+    setSaveNotice("");
+  }, [token?.id, token?.limits]);
 
   function updateLimit(field, value) {
     if (!token) {
       return;
     }
 
-    onUpdateTokenLimits(token.id, {
-      ...limits,
+    setDraftLimits((current) => normalizeTokenLimits({
+      ...current,
       [field]: value,
-    });
+    }));
+    setSaveNotice("");
+  }
+
+  async function saveLimits() {
+    if (!token) {
+      return;
+    }
+
+    setIsSaving(true);
+    setSaveError("");
+    setSaveNotice("");
+
+    try {
+      await onUpdateTokenLimits(token.id, draftLimits);
+      setSaveNotice("Limits saved");
+    } catch (error) {
+      setSaveError(error.message);
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   return (
@@ -760,6 +1122,8 @@ function RateLimitTracker({tokenData, selectedTokenId, onSelectedTokenId, onUpda
         <p className="side-note">Create a token to configure rate limits.</p>
       ) : (
         <>
+          {saveError ? <div className="error-banner">{saveError}</div> : null}
+          {saveNotice ? <div className="success-banner">{saveNotice}</div> : null}
           <div className="limit-grid">
             {status.checks.map((check) => (
               <LimitMeter
@@ -779,7 +1143,7 @@ function RateLimitTracker({tokenData, selectedTokenId, onSelectedTokenId, onUpda
                 min="0"
                 placeholder="Unlimited"
                 type="number"
-                value={limits.totalTokens || ""}
+                value={draftLimits.totalTokens || ""}
                 onChange={(event) => updateLimit("totalTokens", event.target.value)}
               />
             </label>
@@ -788,7 +1152,7 @@ function RateLimitTracker({tokenData, selectedTokenId, onSelectedTokenId, onUpda
               <input
                 min="0"
                 type="number"
-                value={limits.requestsPerMinute || 0}
+                value={draftLimits.requestsPerMinute || 0}
                 onChange={(event) => updateLimit("requestsPerMinute", event.target.value)}
               />
             </label>
@@ -797,7 +1161,7 @@ function RateLimitTracker({tokenData, selectedTokenId, onSelectedTokenId, onUpda
               <input
                 min="0"
                 type="number"
-                value={limits.requestsPerHour || 0}
+                value={draftLimits.requestsPerHour || 0}
                 onChange={(event) => updateLimit("requestsPerHour", event.target.value)}
               />
             </label>
@@ -806,7 +1170,7 @@ function RateLimitTracker({tokenData, selectedTokenId, onSelectedTokenId, onUpda
               <input
                 min="0"
                 type="number"
-                value={limits.requestsPerDay || 0}
+                value={draftLimits.requestsPerDay || 0}
                 onChange={(event) => updateLimit("requestsPerDay", event.target.value)}
               />
             </label>
@@ -815,10 +1179,15 @@ function RateLimitTracker({tokenData, selectedTokenId, onSelectedTokenId, onUpda
               <input
                 min="0"
                 type="number"
-                value={limits.tokensPerDay || 0}
+                value={draftLimits.tokensPerDay || 0}
                 onChange={(event) => updateLimit("tokensPerDay", event.target.value)}
               />
             </label>
+            <div className="limit-actions">
+              <button className="primary-button" disabled={isSaving} onClick={saveLimits} type="button">
+                {isSaving ? "Saving..." : "Save limits"}
+              </button>
+            </div>
           </div>
         </>
       )}
@@ -1304,19 +1673,42 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
   const [tokenLimit, setTokenLimit] = useState("");
   const [formError, setFormError] = useState("");
   const [notice, setNotice] = useState("");
+  const [periodDays, setPeriodDays] = useState(7);
   const [selectedSeriesTokenId, setSelectedSeriesTokenId] = useState("all");
   const [selectedLimitTokenId, setSelectedLimitTokenId] = useState("");
-  const summaries = useMemo(() => getTokenUsageSummary(tokenData), [tokenData]);
+  const [isMutatingToken, setIsMutatingToken] = useState(false);
+  const periodRangeStart = useMemo(() => rangeStartForDays(periodDays), [periodDays]);
+  const periodUsage = useMemo(() => tokenData.usage.filter((entry) => dateInRange(entry.createdAt, periodRangeStart)), [periodRangeStart, tokenData.usage]);
+  const requestEvents = useMemo(() => buildTokenRequestEvents(tokenData), [tokenData]);
+  const periodRequestEvents = useMemo(() => requestEvents.filter((entry) => dateInRange(entry.createdAt, periodRangeStart)), [periodRangeStart, requestEvents]);
+  const periodTokenData = useMemo(() => ({...tokenData, usage: periodUsage}), [periodUsage, tokenData]);
+  const summaries = useMemo(() => getTokenUsageSummary(periodTokenData), [periodTokenData]);
+  const requestSummary = useMemo(() => summarizeRequestEvents(periodRequestEvents), [periodRequestEvents]);
+  const requestByToken = useMemo(() => summarizeRequestsByToken(periodRequestEvents), [periodRequestEvents]);
   const referenceToken = tokenData.tokens.find(isTokenActive) || tokenData.tokens[0];
   const seriesUsage = useMemo(() => {
     if (selectedSeriesTokenId === "all") {
-      return tokenData.usage;
+      return periodUsage;
     }
 
-    return tokenData.usage.filter((entry) => entry.tokenId === selectedSeriesTokenId);
-  }, [selectedSeriesTokenId, tokenData.usage]);
-  const usageSeries = useMemo(() => buildTokenUsageSeries(seriesUsage), [seriesUsage]);
-  const recentUsage = [...tokenData.usage].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, 10);
+    return periodUsage.filter((entry) => entry.tokenId === selectedSeriesTokenId);
+  }, [periodUsage, selectedSeriesTokenId]);
+  const seriesRequests = useMemo(() => {
+    if (selectedSeriesTokenId === "all") {
+      return periodRequestEvents;
+    }
+
+    return periodRequestEvents.filter((entry) => entry.tokenId === selectedSeriesTokenId);
+  }, [periodRequestEvents, selectedSeriesTokenId]);
+  const usageSeries = useMemo(() => buildTokenUsageSeries(seriesUsage, periodDays), [periodDays, seriesUsage]);
+  const requestSeries = useMemo(() => buildTokenRequestSeries(seriesRequests, periodDays), [periodDays, seriesRequests]);
+  const failedStatusChart = useMemo(() => buildFailedStatusSeries(seriesRequests, periodDays), [periodDays, seriesRequests]);
+  const failures = useMemo(() => failureBreakdown(periodRequestEvents), [periodRequestEvents]);
+  const recentUsage = useMemo(
+    () => [...periodRequestEvents].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, 10),
+    [periodRequestEvents],
+  );
+  const selectedPeriodLabel = periodLabel(periodDays);
 
   async function logout() {
     await signOut();
@@ -1336,7 +1728,7 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
     }
   }
 
-  function submit(event) {
+  async function submit(event) {
     event.preventDefault();
     const trimmedLimit = tokenLimit.trim();
     const totalTokens = trimmedLimit ? Math.floor(Number(trimmedLimit)) : 0;
@@ -1347,17 +1739,50 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
       return;
     }
 
-    const token = onCreateToken(name, {totalTokens});
-    setName("");
-    setTokenLimit("");
+    setIsMutatingToken(true);
     setFormError("");
-    setNotice(`${token.name} created`);
+    setNotice("");
+
+    try {
+      const token = await onCreateToken(name, {totalTokens});
+      setName("");
+      setTokenLimit("");
+      setNotice(`${token.name} created`);
+    } catch (error) {
+      setFormError(error.message);
+    } finally {
+      setIsMutatingToken(false);
+    }
   }
 
-  function deleteToken(token) {
+  async function deleteToken(token) {
     if (window.confirm(`Delete ${token.name}?`)) {
-      onDeleteToken(token.id);
-      setNotice(`${token.name} deleted`);
+      setIsMutatingToken(true);
+      setFormError("");
+      setNotice("");
+
+      try {
+        await onDeleteToken(token.id);
+        setNotice(`${token.name} deleted`);
+      } catch (error) {
+        setFormError(error.message);
+      } finally {
+        setIsMutatingToken(false);
+      }
+    }
+  }
+
+  async function toggleToken(token) {
+    setIsMutatingToken(true);
+    setFormError("");
+    setNotice("");
+
+    try {
+      await onToggleToken(token.id);
+    } catch (error) {
+      setFormError(error.message);
+    } finally {
+      setIsMutatingToken(false);
     }
   }
 
@@ -1381,24 +1806,39 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
             <p className="eyebrow">Signed in as {account.name}</p>
             <h2>Token Management</h2>
           </div>
-          <form className="token-form" onSubmit={submit}>
-            <input
-              aria-label="Token name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="Token name"
-            />
-            <input
-              aria-label="Total token quota"
-              inputMode="numeric"
-              min="0"
-              type="number"
-              value={tokenLimit}
-              onChange={(event) => setTokenLimit(event.target.value)}
-              placeholder="Quota optional"
-            />
-            <button className="primary-button">Create token</button>
-          </form>
+          <div className="dashboard-actions token-management-actions">
+            <label className="period-filter">
+              Period
+              <select
+                value={periodDays}
+                onChange={(event) => setPeriodDays(Number(event.target.value))}
+              >
+                {dashboardPeriodOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+            <form className="token-form" onSubmit={submit}>
+              <input
+                aria-label="Token name"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="Token name"
+              />
+              <input
+                aria-label="Total token quota"
+                inputMode="numeric"
+                min="0"
+                type="number"
+                value={tokenLimit}
+                onChange={(event) => setTokenLimit(event.target.value)}
+                placeholder="Quota optional"
+              />
+              <button className="primary-button" disabled={isMutatingToken}>
+                {isMutatingToken ? "Saving..." : "Create token"}
+              </button>
+            </form>
+          </div>
         </div>
 
         {formError ? <div className="error-banner">{formError}</div> : null}
@@ -1406,19 +1846,31 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
 
         <section className="stats-grid" aria-label="Token totals">
           <StatCard label="Tokens" value={tokenData.tokens.length} detail={`${tokenData.tokens.filter(isTokenActive).length} active`} />
-          <StatCard label="Requests" value={summaries.totals.requests} detail="tracked chat turns" />
+          <StatCard label="Attempts" value={requestSummary.total} detail={`${selectedPeriodLabel} token requests`} />
+          <StatCard label="Success rate" value={formatPercent(requestSummary.successRate)} detail={`${requestSummary.success} succeeded`} />
+          <StatCard label="Failed" value={requestSummary.failed} detail={`${selectedPeriodLabel} failed requests`} />
           <StatCard label="Token usage" value={summaries.totals.totalTokens} detail={`${summaries.totals.promptTokens} prompt, ${summaries.totals.responseTokens} response`} />
-          <StatCard label="Prompt tokens" value={summaries.totals.promptTokens} detail="from selected token turns" />
-          <StatCard label="Response tokens" value={summaries.totals.responseTokens} detail="from selected token turns" />
-          <StatCard label="Cost" value={summaries.totals.price.toFixed(4)} detail="reported by Casibase messages" />
+          <StatCard label="Cost" value={summaries.totals.price.toFixed(4)} detail={`${selectedPeriodLabel}, reported by Casibase`} />
         </section>
 
-        <TokenUsageTimeseries
-          selectedTokenId={selectedSeriesTokenId}
-          series={usageSeries}
-          tokens={tokenData.tokens}
-          onSelectedTokenId={setSelectedSeriesTokenId}
+        <TokenRequestMonitoring
+          failureStatusLines={failedStatusChart.lines}
+          failureStatusSeries={failedStatusChart.series}
+          periodLabelText={selectedPeriodLabel}
+          series={requestSeries}
         />
+
+        <div className="token-insight-grid">
+          <TokenUsageTimeseries
+            periodLabelText={selectedPeriodLabel}
+            selectedTokenId={selectedSeriesTokenId}
+            series={usageSeries}
+            tokens={tokenData.tokens}
+            onSelectedTokenId={setSelectedSeriesTokenId}
+          />
+
+          <UsageBreakdown title="Failure Breakdown" entries={failures} />
+        </div>
 
         <RateLimitTracker
           selectedTokenId={selectedLimitTokenId}
@@ -1439,6 +1891,7 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
             <div className="token-table">
               {tokenData.tokens.map((token) => {
                 const usage = summaries.byToken[token.id] || {};
+                const requestStats = requestByToken[token.id] || {};
 
                 return (
                   <article className="token-row" key={token.id}>
@@ -1448,16 +1901,17 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
                     </div>
                     <span className={`status-pill ${isTokenActive(token) ? "active" : "inactive"}`}>{token.status}</span>
                     <div className="token-usage">
-                      <span>{usage.requests || 0} requests</span>
+                      <span>{requestStats.total || 0} attempts · {formatPercent(requestStats.successRate)}</span>
+                      <span>{requestStats.failed || 0} failed · {requestStats.lastFailureReason || "No failures"}</span>
                       <span>{usage.totalTokens || 0} / {limitText(token.limits?.totalTokens || 0)} quota</span>
-                      <span>{formatChatTime(usage.lastUsedAt || token.lastUsedAt)}</span>
+                      <span>{usage.lastUsedAt ? formatChatTime(usage.lastUsedAt) : `No use in ${selectedPeriodLabel}`}</span>
                     </div>
                     <div className="token-actions">
                       <button className="small-button" onClick={() => copyToken(token)}>Copy</button>
-                      <button className="small-button" onClick={() => onToggleToken(token.id)}>
+                      <button className="small-button" disabled={isMutatingToken} onClick={() => toggleToken(token)}>
                         {isTokenActive(token) ? "Deactivate" : "Activate"}
                       </button>
-                      <button className="small-button danger" onClick={() => deleteToken(token)}>Delete</button>
+                      <button className="small-button danger" disabled={isMutatingToken} onClick={() => deleteToken(token)}>Delete</button>
                     </div>
                   </article>
                 );
@@ -1468,20 +1922,22 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
 
         <section className="dashboard-section token-section">
           <div className="section-heading">
-            <h2>Recent Token Usage</h2>
+            <h2>Recent Token Requests</h2>
+            <p className="side-note">{selectedPeriodLabel}</p>
           </div>
           {recentUsage.length === 0 ? (
-            <p className="side-note">No token usage yet.</p>
+            <p className="side-note">No token requests in this time window yet.</p>
           ) : (
             <div className="recent-table">
               {recentUsage.map((entry) => {
                 const token = tokenData.tokens.find((item) => item.id === entry.tokenId);
 
                 return (
-                  <div className="recent-row token-usage-row" key={entry.id}>
+                  <div className={`recent-row token-usage-row request-${entry.status}`} key={entry.id}>
                     <strong>{token?.name || "Deleted token"}</strong>
-                    <span>{entry.totalTokens} tokens</span>
-                    <span>{entry.chatTitle || entry.chatName}</span>
+                    <span>{entry.status === "success" ? "Success" : "Failed"}</span>
+                    <span>{entry.status === "success" ? `${entry.totalTokens || 0} tokens` : (entry.errorMessage || entry.errorType || "Failed")}</span>
+                    <span>{entry.chatTitle || entry.chatName || entry.failureStage || entry.source}</span>
                     <span>{formatChatTime(entry.createdAt)}</span>
                   </div>
                 );
@@ -1691,7 +2147,7 @@ function MessageList({messages, account, streamingText, reasonText}) {
   );
 }
 
-function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}) {
+function ChatPage({account, onCheckTokenLimit, onLogout, onNavigate, tokenData, onRecordTokenRequest, onRecordTokenUsage}) {
   const [stores, setStores] = useState([]);
   const [chats, setChats] = useState([]);
   const [storeName, setStoreName] = useState("");
@@ -2045,6 +2501,7 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
     setIsSending(true);
     setStreamingText("");
     setReasonText("");
+    const requestStartedAt = Date.now();
 
     try {
       const usageToken = selectedToken;
@@ -2163,6 +2620,26 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
             return;
           }
 
+          if (usageToken) {
+            onRecordTokenRequest({
+              tokenId: usageToken.id,
+              createdAt: new Date().toISOString(),
+              status: "failed",
+              source: "chat",
+              httpStatus: 500,
+              errorType: "stream_error",
+              errorMessage: error.message,
+              failureStage: "stream",
+              promptTokens: estimateTokenCount(modelText),
+              responseTokens: 0,
+              totalTokens: estimateTokenCount(modelText),
+              latencyMs: Date.now() - requestStartedAt,
+              chatName: updatedChat.name,
+              chatTitle: updatedChat.displayName || updatedChat.name,
+              modelProvider: updatedChat.modelProvider || selectedStore?.modelProvider || "",
+            });
+          }
+
           streamStateRef.current = null;
           closeStreamRef.current = null;
           setError(error.message);
@@ -2173,6 +2650,25 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
       });
     } catch (error) {
       streamStateRef.current = null;
+      if (selectedToken) {
+        onRecordTokenRequest({
+          tokenId: selectedToken.id,
+          createdAt: new Date().toISOString(),
+          status: "failed",
+          source: "chat",
+          httpStatus: 500,
+          errorType: "client_error",
+          errorMessage: error.message,
+          failureStage: "client",
+          promptTokens: estimateTokenCount(text),
+          responseTokens: 0,
+          totalTokens: estimateTokenCount(text),
+          latencyMs: Date.now() - requestStartedAt,
+          chatName: chat?.name || "",
+          chatTitle: chat?.displayName || chat?.name || "",
+          modelProvider: selectedStore?.modelProvider || "",
+        });
+      }
       setError(error.message);
       setIsSending(false);
       setStreamingText("");
@@ -2195,9 +2691,11 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
     }
 
     if (selectedToken) {
-      const limitStatus = getTokenLimitStatus(selectedToken, tokenData.usage, estimateTokenCount(text));
-      if (!limitStatus.allowed) {
-        setError(`Token limit exceeded: ${limitStatus.reasons.join("; ")}`);
+      try {
+        await onCheckTokenLimit(selectedToken.id, text);
+      } catch (error) {
+        const prefix = error.message.toLowerCase().includes("limit") ? "Token limit exceeded: " : "";
+        setError(`${prefix}${error.message}`);
         return;
       }
     }
@@ -2367,6 +2865,20 @@ export default function App() {
     setPath(nextPath);
   }
 
+  function applyTokenState(next) {
+    const state = {
+      ...emptyTokenState(),
+      ...next,
+      tokens: Array.isArray(next?.tokens) ? next.tokens : [],
+      usage: Array.isArray(next?.usage) ? next.usage : [],
+      requestEvents: Array.isArray(next?.requestEvents) ? next.requestEvents : [],
+    };
+
+    saveTokenState(account, state);
+    setTokenData(state);
+    return state;
+  }
+
   function persistTokenData(next) {
     saveTokenState(account, next);
 
@@ -2382,55 +2894,89 @@ export default function App() {
       .catch(() => null);
   }
 
-  function updateTokenData(updater) {
-    setTokenData((current) => {
-      const next = updater(current);
-      persistTokenData(next);
-      return next;
-    });
+  function applyTokenMutation(result) {
+    if (result?.state) {
+      applyTokenState(result.state);
+    }
+
+    return result;
   }
 
-  function createManagedToken(name, limits) {
-    const token = createTokenRecord(name, limits);
-    updateTokenData((current) => ({
-      ...current,
-      tokens: [token, ...current.tokens],
-    }));
-    return token;
+  async function createManagedToken(name, limits) {
+    const result = applyTokenMutation(await mutateTokenState("create-token", {name, limits}));
+    return result.token;
   }
 
-  function toggleManagedToken(tokenId) {
-    updateTokenData((current) => ({
-      ...current,
-      tokens: current.tokens.map((token) => token.id === tokenId
-        ? {...token, status: isTokenActive(token) ? "Inactive" : "Active"}
-        : token),
-    }));
+  async function toggleManagedToken(tokenId) {
+    applyTokenMutation(await mutateTokenState("toggle-token", {tokenId}));
   }
 
-  function updateManagedTokenLimits(tokenId, limits) {
-    updateTokenData((current) => ({
-      ...current,
-      tokens: current.tokens.map((token) => token.id === tokenId
-        ? {...token, limits: normalizeTokenLimits(limits)}
-        : token),
-    }));
+  async function updateManagedTokenLimits(tokenId, limits) {
+    applyTokenMutation(await mutateTokenState("update-token-limits", {tokenId, limits: normalizeTokenLimits(limits)}));
   }
 
-  function deleteManagedToken(tokenId) {
-    updateTokenData((current) => ({
-      ...current,
-      tokens: current.tokens.filter((token) => token.id !== tokenId),
-      usage: current.usage.filter((entry) => entry.tokenId !== tokenId),
-    }));
+  async function deleteManagedToken(tokenId) {
+    applyTokenMutation(await mutateTokenState("delete-token", {tokenId}));
   }
 
   function recordManagedTokenUsage(entry) {
-    updateTokenData((current) => ({
-      ...current,
-      tokens: current.tokens.map((token) => token.id === entry.tokenId ? {...token, lastUsedAt: entry.createdAt} : token),
-      usage: [entry, ...current.usage].slice(0, 500),
-    }));
+    mutateTokenState("record-usage", {entry})
+      .then(applyTokenMutation)
+      .catch(() => persistTokenData({
+        ...tokenData,
+        tokens: tokenData.tokens.map((token) => token.id === entry.tokenId ? {...token, lastUsedAt: entry.createdAt} : token),
+        usage: [entry, ...tokenData.usage].slice(0, 500),
+        requestEvents: [
+          {
+            id: `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            tokenId: entry.tokenId,
+            createdAt: entry.createdAt,
+            status: "success",
+            source: "chat",
+            httpStatus: 200,
+            errorType: "",
+            errorMessage: "",
+            failureStage: "",
+            promptTokens: entry.promptTokens || 0,
+            responseTokens: entry.responseTokens || 0,
+            totalTokens: entry.totalTokens || 0,
+            latencyMs: 0,
+            chatName: entry.chatName || "",
+            chatTitle: entry.chatTitle || "",
+            modelProvider: "",
+            usageId: entry.id,
+          },
+          ...(tokenData.requestEvents || []),
+        ].slice(0, 1000),
+      }));
+  }
+
+  function recordManagedTokenRequest(event) {
+    mutateTokenState("record-request", {event})
+      .then(applyTokenMutation)
+      .catch(() => persistTokenData({
+        ...tokenData,
+        requestEvents: [
+          {
+            id: event.id || `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            createdAt: event.createdAt || new Date().toISOString(),
+            status: event.status || "failed",
+            ...event,
+          },
+          ...(tokenData.requestEvents || []),
+        ].slice(0, 1000),
+      }));
+  }
+
+  async function checkManagedTokenLimit(tokenId, promptText) {
+    const result = await checkTokenLimit({
+      tokenId,
+      promptText,
+      pendingTokens: estimateTokenCount(promptText),
+    });
+
+    applyTokenMutation(result);
+    return result;
   }
 
   useEffect(() => {
@@ -2459,10 +3005,11 @@ export default function App() {
     setTokenData(next);
     syncTokenState(account, next)
       .then((synced) => {
-        saveTokenState(account, synced);
-        setTokenData(synced);
+        applyTokenState(synced);
       })
-      .catch(() => null);
+      .catch(() => getServerTokenState()
+        .then(applyTokenState)
+        .catch(() => null));
   }, [account]);
 
   if (isChecking) {
@@ -2511,8 +3058,10 @@ export default function App() {
   return (
     <ChatPage
       account={account}
+      onCheckTokenLimit={checkManagedTokenLimit}
       onLogout={() => setAccount(null)}
       onNavigate={navigate}
+      onRecordTokenRequest={recordManagedTokenRequest}
       onRecordTokenUsage={recordManagedTokenUsage}
       tokenData={tokenData}
     />
