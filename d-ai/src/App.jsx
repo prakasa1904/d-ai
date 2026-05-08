@@ -379,6 +379,7 @@ function buildTokenRequestEvents(tokenData) {
       responseTokens: Number(entry.responseTokens || 0),
       totalTokens: Number(entry.totalTokens || 0),
       latencyMs: 0,
+      historyKey: entry.historyKey || "",
       chatName: entry.chatName || "",
       chatTitle: entry.chatTitle || "",
       modelProvider: entry.modelProvider || "",
@@ -526,6 +527,59 @@ function failureBreakdown(events, limit = 6) {
     (event) => event.errorType || event.failureStage || "unknown",
   );
   return topEntries(counts, limit);
+}
+
+function tokenLogSummary(events) {
+  return events.reduce((summary, event) => {
+    summary.total += 1;
+    summary.promptTokens += Number(event.promptTokens || 0);
+    summary.responseTokens += Number(event.responseTokens || 0);
+    summary.totalTokens += Number(event.totalTokens || 0);
+
+    if (event.status === "success") {
+      summary.success += 1;
+    } else {
+      summary.failed += 1;
+    }
+
+    if (!summary.lastSeenAt || String(event.createdAt || "").localeCompare(summary.lastSeenAt) > 0) {
+      summary.lastSeenAt = event.createdAt || "";
+    }
+
+    return summary;
+  }, {
+    total: 0,
+    success: 0,
+    failed: 0,
+    promptTokens: 0,
+    responseTokens: 0,
+    totalTokens: 0,
+    lastSeenAt: "",
+  });
+}
+
+function requestLogDetail(entry) {
+  if (entry.status === "success") {
+    return entry.chatTitle || entry.chatName || entry.historyKey || entry.source || "Completed";
+  }
+
+  return entry.errorMessage || entry.errorType || entry.failureStage || "Failed";
+}
+
+function requestLogSource(entry) {
+  const source = entry.source || "unknown";
+  const historyKey = entry.historyKey || "";
+  return historyKey ? `${source} · ${historyKey}` : source;
+}
+
+function requestLogHttpStatus(entry) {
+  const value = entry.httpStatus || (entry.status === "success" ? 200 : "");
+  return value ? `HTTP ${value}` : "No status";
+}
+
+function requestLogLatency(entry) {
+  const latencyMs = Number(entry.latencyMs || 0);
+  return latencyMs > 0 ? `${latencyMs.toLocaleString()} ms` : "No latency";
 }
 
 function formatPercent(value) {
@@ -1195,6 +1249,125 @@ function RateLimitTracker({tokenData, selectedTokenId, onSelectedTokenId, onUpda
   );
 }
 
+function TokenRequestLog({events, tokens, selectedTokenId, onCopy, onSelectedTokenId, periodLabelText}) {
+  const token = tokens.find((item) => item.id === selectedTokenId) || tokens[0];
+  const rows = useMemo(
+    () => [...events]
+      .filter((entry) => entry.tokenId === token?.id)
+      .sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")))
+      .slice(0, 50),
+    [events, token?.id],
+  );
+  const summary = useMemo(() => tokenLogSummary(rows), [rows]);
+
+  async function copyLogs() {
+    const payload = rows.map((entry) => ({
+      id: entry.id,
+      createdAt: entry.createdAt,
+      tokenId: entry.tokenId,
+      tokenName: token?.name || "",
+      status: entry.status,
+      source: entry.source || "",
+      historyKey: entry.historyKey || "",
+      httpStatus: entry.httpStatus || "",
+      errorType: entry.errorType || "",
+      errorMessage: entry.errorMessage || "",
+      failureStage: entry.failureStage || "",
+      promptTokens: Number(entry.promptTokens || 0),
+      responseTokens: Number(entry.responseTokens || 0),
+      totalTokens: Number(entry.totalTokens || 0),
+      latencyMs: Number(entry.latencyMs || 0),
+      chatName: entry.chatName || "",
+      chatTitle: entry.chatTitle || "",
+      modelProvider: entry.modelProvider || "",
+    }));
+
+    await onCopy("Token logs", JSON.stringify(payload, null, 2));
+  }
+
+  return (
+    <section className="dashboard-section token-section token-log-section" id="token-request-log">
+      <div className="section-heading token-chart-heading">
+        <div>
+          <h2>Token Request Log</h2>
+          <p className="side-note">{periodLabelText} · latest 50 entries for the selected token</p>
+        </div>
+        <div className="token-log-controls">
+          <select value={token?.id || ""} onChange={(event) => onSelectedTokenId(event.target.value)}>
+            {tokens.map((item) => (
+              <option key={item.id} value={item.id}>{item.name}</option>
+            ))}
+          </select>
+          <button className="small-button" disabled={!rows.length} onClick={copyLogs}>Copy logs</button>
+        </div>
+      </div>
+
+      {!token ? (
+        <p className="side-note">Create a token to view request logs.</p>
+      ) : (
+        <>
+          <div className="token-log-summary" aria-label="Selected token log summary">
+            <div>
+              <span>Attempts</span>
+              <strong>{summary.total}</strong>
+            </div>
+            <div>
+              <span>Success</span>
+              <strong>{summary.success}</strong>
+            </div>
+            <div>
+              <span>Failed</span>
+              <strong>{summary.failed}</strong>
+            </div>
+            <div>
+              <span>Tokens</span>
+              <strong>{summary.totalTokens.toLocaleString()}</strong>
+            </div>
+            <div>
+              <span>Last seen</span>
+              <strong>{summary.lastSeenAt ? formatChatTime(summary.lastSeenAt) : "No traffic"}</strong>
+            </div>
+          </div>
+
+          {rows.length === 0 ? (
+            <p className="side-note">No requests for {token.name} in this time window yet.</p>
+          ) : (
+            <div className="token-log-table">
+              <div className="token-log-row token-log-header">
+                <span>Time</span>
+                <span>Status</span>
+                <span>Source / History</span>
+                <span>Usage</span>
+                <span>Latency</span>
+                <span>Detail</span>
+              </div>
+              {rows.map((entry) => (
+                <div className={`token-log-row request-${entry.status}`} key={entry.id}>
+                  <span>{formatChatTime(entry.createdAt)}</span>
+                  <span>
+                    <strong>{entry.status === "success" ? "Success" : "Failed"}</strong>
+                    <small>{requestLogHttpStatus(entry)}</small>
+                  </span>
+                  <span>
+                    <strong>{requestLogSource(entry)}</strong>
+                    <small>{entry.modelProvider || "No provider recorded"}</small>
+                  </span>
+                  <span>
+                    <strong>{Number(entry.totalTokens || 0).toLocaleString()} tokens</strong>
+                    <small>{Number(entry.promptTokens || 0).toLocaleString()} in · {Number(entry.responseTokens || 0).toLocaleString()} out</small>
+                  </span>
+                  <span>{requestLogLatency(entry)}</span>
+                  <span>{requestLogDetail(entry)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 function DashboardPage({account, onLogout, onNavigate}) {
   const [stores, setStores] = useState([]);
   const [chats, setChats] = useState([]);
@@ -1668,14 +1841,13 @@ function ProfilePage({account, onAccountUpdated, onLogout, onNavigate}) {
   );
 }
 
-function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteToken, onLogout, onNavigate, onUpdateTokenLimits}) {
+function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteToken, onLogout, onNavigate}) {
   const [name, setName] = useState("");
   const [tokenLimit, setTokenLimit] = useState("");
   const [formError, setFormError] = useState("");
   const [notice, setNotice] = useState("");
   const [periodDays, setPeriodDays] = useState(7);
   const [selectedSeriesTokenId, setSelectedSeriesTokenId] = useState("all");
-  const [selectedLimitTokenId, setSelectedLimitTokenId] = useState("");
   const [isMutatingToken, setIsMutatingToken] = useState(false);
   const periodRangeStart = useMemo(() => rangeStartForDays(periodDays), [periodDays]);
   const periodUsage = useMemo(() => tokenData.usage.filter((entry) => dateInRange(entry.createdAt, periodRangeStart)), [periodRangeStart, tokenData.usage]);
@@ -1685,7 +1857,6 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
   const summaries = useMemo(() => getTokenUsageSummary(periodTokenData), [periodTokenData]);
   const requestSummary = useMemo(() => summarizeRequestEvents(periodRequestEvents), [periodRequestEvents]);
   const requestByToken = useMemo(() => summarizeRequestsByToken(periodRequestEvents), [periodRequestEvents]);
-  const referenceToken = tokenData.tokens.find(isTokenActive) || tokenData.tokens[0];
   const seriesUsage = useMemo(() => {
     if (selectedSeriesTokenId === "all") {
       return periodUsage;
@@ -1790,11 +1961,7 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
     if (selectedSeriesTokenId !== "all" && !tokenData.tokens.some((token) => token.id === selectedSeriesTokenId)) {
       setSelectedSeriesTokenId("all");
     }
-
-    if (!tokenData.tokens.some((token) => token.id === selectedLimitTokenId)) {
-      setSelectedLimitTokenId(tokenData.tokens[0]?.id || "");
-    }
-  }, [selectedLimitTokenId, selectedSeriesTokenId, tokenData.tokens]);
+  }, [selectedSeriesTokenId, tokenData.tokens]);
 
   return (
     <main className="chat-shell">
@@ -1872,15 +2039,6 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
           <UsageBreakdown title="Failure Breakdown" entries={failures} />
         </div>
 
-        <RateLimitTracker
-          selectedTokenId={selectedLimitTokenId}
-          tokenData={tokenData}
-          onSelectedTokenId={setSelectedLimitTokenId}
-          onUpdateTokenLimits={onUpdateTokenLimits}
-        />
-
-        <ApiReference token={referenceToken} onCopy={copyText} />
-
         <section className="dashboard-section token-section">
           <div className="section-heading">
             <h2>Tokens</h2>
@@ -1908,6 +2066,7 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
                     </div>
                     <div className="token-actions">
                       <button className="small-button" onClick={() => copyToken(token)}>Copy</button>
+                      <button className="small-button" onClick={() => onNavigate(`/tokens/${token.id}`)}>Details</button>
                       <button className="small-button" disabled={isMutatingToken} onClick={() => toggleToken(token)}>
                         {isTokenActive(token) ? "Deactivate" : "Activate"}
                       </button>
@@ -1945,6 +2104,226 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
             </div>
           )}
         </section>
+      </section>
+    </main>
+  );
+}
+
+function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteToken, onLogout, onNavigate, onUpdateTokenLimits}) {
+  const [periodDays, setPeriodDays] = useState(7);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const [isMutatingToken, setIsMutatingToken] = useState(false);
+  const token = tokenData.tokens.find((item) => item.id === tokenId);
+  const periodRangeStart = useMemo(() => rangeStartForDays(periodDays), [periodDays]);
+  const requestEvents = useMemo(() => buildTokenRequestEvents(tokenData), [tokenData]);
+  const periodRequestEvents = useMemo(() => requestEvents.filter((entry) => dateInRange(entry.createdAt, periodRangeStart)), [periodRangeStart, requestEvents]);
+  const tokenRequestEvents = useMemo(() => periodRequestEvents.filter((entry) => entry.tokenId === token?.id), [periodRequestEvents, token?.id]);
+  const tokenUsage = useMemo(
+    () => tokenData.usage.filter((entry) => entry.tokenId === token?.id && dateInRange(entry.createdAt, periodRangeStart)),
+    [periodRangeStart, token?.id, tokenData.usage],
+  );
+  const tokenOnlyData = useMemo(() => ({
+    ...tokenData,
+    tokens: token ? [token] : [],
+    usage: tokenUsage,
+  }), [token, tokenData, tokenUsage]);
+  const summaries = useMemo(() => getTokenUsageSummary(tokenOnlyData), [tokenOnlyData]);
+  const usage = token ? summaries.byToken[token.id] || {} : {};
+  const requestSummary = useMemo(() => summarizeRequestEvents(tokenRequestEvents), [tokenRequestEvents]);
+  const requestSeries = useMemo(() => buildTokenRequestSeries(tokenRequestEvents, periodDays), [periodDays, tokenRequestEvents]);
+  const failedStatusChart = useMemo(() => buildFailedStatusSeries(tokenRequestEvents, periodDays), [periodDays, tokenRequestEvents]);
+  const usageSeries = useMemo(() => buildTokenUsageSeries(tokenUsage, periodDays), [periodDays, tokenUsage]);
+  const failures = useMemo(() => failureBreakdown(tokenRequestEvents), [tokenRequestEvents]);
+  const selectedPeriodLabel = periodLabel(periodDays);
+
+  async function logout() {
+    await signOut();
+    onLogout();
+  }
+
+  async function copyText(label, text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setNotice(`${label} copied`);
+      setError("");
+    } catch {
+      setError("Copy failed");
+      setNotice("");
+    }
+  }
+
+  async function copyToken() {
+    if (token) {
+      await copyText(token.name, token.value);
+    }
+  }
+
+  async function toggleToken() {
+    if (!token) {
+      return;
+    }
+
+    setIsMutatingToken(true);
+    setError("");
+    setNotice("");
+
+    try {
+      await onToggleToken(token.id);
+    } catch (nextError) {
+      setError(nextError.message);
+    } finally {
+      setIsMutatingToken(false);
+    }
+  }
+
+  async function deleteToken() {
+    if (!token || !window.confirm(`Delete ${token.name}?`)) {
+      return;
+    }
+
+    setIsMutatingToken(true);
+    setError("");
+    setNotice("");
+
+    try {
+      await onDeleteToken(token.id);
+      onNavigate("/tokens");
+    } catch (nextError) {
+      setError(nextError.message);
+    } finally {
+      setIsMutatingToken(false);
+    }
+  }
+
+  function selectToken(nextTokenId) {
+    if (nextTokenId === "all") {
+      onNavigate("/tokens");
+      return;
+    }
+
+    onNavigate(`/tokens/${nextTokenId}`);
+  }
+
+  if (!token) {
+    return (
+      <main className="chat-shell">
+        <AppHeader account={account} currentPath="/tokens" onLogout={logout} onNavigate={onNavigate} />
+        <section className="dashboard-layout">
+          <section className="empty-state">
+            <h2>Token not found</h2>
+            <p className="side-note">This token may have been deleted or belongs to another signed-in account.</p>
+            <button className="primary-button" onClick={() => onNavigate("/tokens")}>Back to tokens</button>
+          </section>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="chat-shell">
+      <AppHeader account={account} currentPath="/tokens" onLogout={logout} onNavigate={onNavigate} />
+
+      <section className="dashboard-layout">
+        <div className="dashboard-title">
+          <div>
+            <p className="eyebrow">Token detail</p>
+            <h2>{token.name}</h2>
+          </div>
+          <div className="dashboard-actions">
+            <label className="period-filter">
+              Period
+              <select
+                value={periodDays}
+                onChange={(event) => setPeriodDays(Number(event.target.value))}
+              >
+                {dashboardPeriodOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+            <button className="ghost-button" onClick={() => onNavigate("/tokens")}>Back to tokens</button>
+            <button className="ghost-button" onClick={copyToken}>Copy token</button>
+            <button className="ghost-button" disabled={isMutatingToken} onClick={toggleToken}>
+              {isTokenActive(token) ? "Deactivate" : "Activate"}
+            </button>
+            <button className="small-button danger" disabled={isMutatingToken} onClick={deleteToken}>Delete</button>
+          </div>
+        </div>
+
+        {error ? <div className="error-banner">{error}</div> : null}
+        {notice ? <div className="success-banner">{notice}</div> : null}
+
+        <section className="dashboard-section token-section token-detail-overview">
+          <div className="token-detail-main">
+            <div>
+              <span>Token</span>
+              <code>{maskToken(token.value)}</code>
+            </div>
+            <div>
+              <span>Status</span>
+              <strong>{token.status}</strong>
+            </div>
+            <div>
+              <span>Created</span>
+              <strong>{formatFullTime(token.createdAt)}</strong>
+            </div>
+            <div>
+              <span>Last used</span>
+              <strong>{formatFullTime(usage.lastUsedAt || token.lastUsedAt)}</strong>
+            </div>
+            <div>
+              <span>Total quota</span>
+              <strong>{limitText(token.limits?.totalTokens || 0)}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section className="stats-grid" aria-label="Selected token totals">
+          <StatCard label="Attempts" value={requestSummary.total} detail={`${selectedPeriodLabel} token requests`} />
+          <StatCard label="Success rate" value={formatPercent(requestSummary.successRate)} detail={`${requestSummary.success} succeeded`} />
+          <StatCard label="Failed" value={requestSummary.failed} detail={`${selectedPeriodLabel} failed requests`} />
+          <StatCard label="Token usage" value={usage.totalTokens || 0} detail={`${usage.promptTokens || 0} prompt, ${usage.responseTokens || 0} response`} />
+          <StatCard label="Quota" value={`${usage.totalTokens || 0} / ${limitText(token.limits?.totalTokens || 0)}`} detail="Lifetime token quota" />
+          <StatCard label="Cost" value={(usage.price || 0).toFixed(4)} detail={`${selectedPeriodLabel}, reported by Casibase`} />
+        </section>
+
+        <TokenRequestMonitoring
+          failureStatusLines={failedStatusChart.lines}
+          failureStatusSeries={failedStatusChart.series}
+          periodLabelText={selectedPeriodLabel}
+          series={requestSeries}
+        />
+
+        <div className="token-insight-grid">
+          <TokenUsageTimeseries
+            periodLabelText={selectedPeriodLabel}
+            selectedTokenId={token.id}
+            series={usageSeries}
+            tokens={tokenData.tokens}
+            onSelectedTokenId={selectToken}
+          />
+
+          <UsageBreakdown title="Failure Breakdown" entries={failures} />
+        </div>
+
+        <RateLimitTracker
+          selectedTokenId={token.id}
+          tokenData={tokenData}
+          onSelectedTokenId={selectToken}
+          onUpdateTokenLimits={onUpdateTokenLimits}
+        />
+
+        <ApiReference token={token} onCopy={copyText} />
+
+        <TokenRequestLog
+          events={periodRequestEvents}
+          periodLabelText={selectedPeriodLabel}
+          selectedTokenId={token.id}
+          tokens={tokenData.tokens}
+          onCopy={copyText}
+          onSelectedTokenId={selectToken}
+        />
       </section>
     </main>
   );
@@ -3035,6 +3414,22 @@ export default function App() {
         account={account}
         tokenData={tokenData}
         onCreateToken={createManagedToken}
+        onDeleteToken={deleteManagedToken}
+        onLogout={() => setAccount(null)}
+        onNavigate={navigate}
+        onToggleToken={toggleManagedToken}
+      />
+    );
+  }
+
+  if (path.startsWith("/tokens/")) {
+    const tokenId = decodeURIComponent(path.slice("/tokens/".length));
+
+    return (
+      <TokenDetailPage
+        account={account}
+        tokenData={tokenData}
+        tokenId={tokenId}
         onDeleteToken={deleteManagedToken}
         onLogout={() => setAccount(null)}
         onNavigate={navigate}

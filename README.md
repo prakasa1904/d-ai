@@ -182,7 +182,8 @@ Restart `npm run dev` after changing `vite.config.js`, server middleware, or `.e
 - Login page: sign in with a Casdoor user or register a new `ifm` user without exposing the organization field.
 - Chat page: create new chats, upload image attachments into the selected Casibase store, forward image metadata into prompts, open history, rename chats, delete chats, and stop or steer an active streaming response.
 - Dashboard page: view signed-in user chat and message usage.
-- Tokens page: create/copy/delete/activate/deactivate D-AI tokens, monitor request success rate, failed requests, failure breakdown, token usage, and configure optional server-side rate limits.
+- Tokens summary page (`/tokens`): create/copy/delete/activate/deactivate D-AI tokens, monitor fleet-level request success rate, failed requests, failure breakdown, token usage, and open token details.
+- Token detail page (`/tokens/{token-id}`): inspect one token's metadata, API reference, rate limits, usage charts, failure charts, and request logs.
 - Profile page: update Casdoor profile fields such as display name, avatar, contact info, work info, preferences, and bio.
 
 Profile updates require a Casdoor access token. New logins obtain it automatically. If you were already signed in before this feature was added, open `Profile`, enter your current password in `Confirm Access`, and save again.
@@ -191,7 +192,7 @@ Casibase can still generate its own chat titles, such as `New Chat - 1`, after a
 
 Chat attachments are intentionally limited to images in D-AI. Casibase's document/vector indexer does not support image extensions such as `.jpeg`, so D-AI stores the image and sends image metadata/URL context to the chat instead of treating the upload as a text document. Image understanding still depends on the selected Casibase model provider: use a vision-capable model, and make sure the image URL is reachable by that model runtime.
 
-D-AI token limits, usage, and request-attempt monitoring are server-authoritative in the local middleware. The browser keeps a local cache for fast rendering, but token creation, limit edits, activation, deletion, usage recording, failed request recording, and pre-chat limit checks go through `/api/d-ai/*` routes. This prevents stale browser state from silently overriding updated limits.
+D-AI token state is handled by the local middleware in development. For ownership boundaries, local persistence, security, and production guidance, see [Application Responsibilities](docs/application-responsibilities.md).
 
 For `/api/v1/chat/completions`, reuse the same `X-D-AI-History-Key` header to append requests to the same Casibase chat history. If the header is omitted, D-AI uses `default`, so each token has one stable default API conversation. Use a different history key only when you want a separate API conversation.
 
@@ -374,19 +375,11 @@ curl 'http://localhost:5174/api/v1/history?key=openclaw%3Acasibase%3Adebug-login
   -H 'Authorization: Bearer <D_AI_TOKEN>'
 ```
 
-Tokens are synced from the browser into the local Vite API layer after sign-in. If a new token is rejected by curl, refresh D-AI once while signed in and try again.
-
-Local API state is stored in:
-
-```text
-d-ai/.d-ai-state/tokens.json
-```
-
-That folder is git-ignored because it contains bearer tokens and browser session cookies.
+Tokens are synced from the browser into the local Vite API layer after sign-in. If a new token is rejected by curl, refresh D-AI once while signed in and try again. The local state file is documented in [Application Responsibilities](docs/application-responsibilities.md).
 
 ## Production Note
 
-The local `/api/d-ai/*` and `/api/v1/chat/completions` routes are implemented as Vite middleware for development. Before exposing this API to real clients, move Casdoor token exchange, token validation, quota enforcement, and Casibase proxy logic into a production backend.
+The local `/api/d-ai/*` and `/api/v1/*` routes are Vite middleware for development. See [Application Responsibilities](docs/application-responsibilities.md) before exposing them to real clients.
 
 ## Troubleshooting
 

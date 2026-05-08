@@ -845,6 +845,48 @@ textarea:focus {
   min-height: 330px;
 }
 
+.token-detail-overview {
+  min-height: auto;
+}
+
+.token-detail-main {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.5fr) repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.token-detail-main div {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid #edf2ed;
+  border-radius: 8px;
+  background: #f9faf8;
+}
+
+.token-detail-main span {
+  color: #66736d;
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.token-detail-main strong,
+.token-detail-main code {
+  min-width: 0;
+  overflow: hidden;
+  color: #17211f;
+  font-size: 0.88rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.token-detail-main code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 .monitoring-grid,
 .token-insight-grid {
   display: grid;
@@ -1285,6 +1327,111 @@ textarea:focus {
   grid-template-columns: minmax(0, 1fr) 90px minmax(160px, 1fr) minmax(120px, 180px) 120px;
 }
 
+.token-log-section {
+  scroll-margin-top: 18px;
+}
+
+.token-log-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.token-log-controls select {
+  width: min(100%, 260px);
+  height: 36px;
+}
+
+.token-log-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.token-log-summary div {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid #edf2ed;
+  border-radius: 8px;
+  background: #f9faf8;
+}
+
+.token-log-summary span {
+  color: #66736d;
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.token-log-summary strong {
+  overflow: hidden;
+  color: #17211f;
+  font-size: 0.95rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.token-log-table {
+  display: grid;
+  gap: 8px;
+}
+
+.token-log-row {
+  display: grid;
+  grid-template-columns: 122px 96px minmax(150px, 1.05fr) minmax(130px, 0.9fr) 90px minmax(180px, 1.35fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 50px;
+  padding: 9px 10px;
+  border: 1px solid #edf2ed;
+  border-radius: 8px;
+}
+
+.token-log-row > span {
+  min-width: 0;
+  overflow: hidden;
+  color: #66736d;
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.token-log-row strong,
+.token-log-row small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.token-log-row strong {
+  color: #17211f;
+  font-size: 0.82rem;
+}
+
+.token-log-row small {
+  margin-top: 3px;
+  color: #66736d;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.token-log-header {
+  min-height: 34px;
+  background: #f6f7f4;
+}
+
+.token-log-header span {
+  color: #44504b;
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
 .request-success {
   border-color: #d6eadf;
 }
@@ -1585,6 +1732,8 @@ textarea:focus {
   .token-insight-grid,
   .limit-grid,
   .limit-editor,
+  .token-detail-main,
+  .token-log-summary,
   .profile-auth-card,
   .profile-grid {
     grid-template-columns: 1fr;
@@ -1602,9 +1751,23 @@ textarea:focus {
   .token-form,
   .token-row,
   .token-usage-row,
+  .token-log-row,
   .api-grid,
   .api-field {
     grid-template-columns: 1fr;
+  }
+
+  .token-log-header {
+    display: none;
+  }
+
+  .token-log-controls {
+    justify-content: flex-start;
+  }
+
+  .token-log-controls select,
+  .token-log-controls .small-button {
+    width: 100%;
   }
 
   .token-chart-heading {
