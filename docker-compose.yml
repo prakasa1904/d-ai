@@ -41,6 +41,35 @@ services:
     ports:
       - "3308:3306"
 
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      - minio
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        until mc alias set local http://minio:9000 minioadmin minioadmin; do
+          sleep 2
+        done
+        mc mb --ignore-existing local/casibase
+        mc anonymous set none local/casibase
+
   casibase:
     image: casbin/casibase:latest
     container_name: casibase
@@ -48,6 +77,7 @@ services:
     depends_on:
       - casibase-db
       - casdoor
+      - minio
     extra_hosts:
       - "casdoor.local:host-gateway"
     environment:
@@ -72,3 +102,4 @@ services:
 volumes:
   casdoor_db_data:
   casibase_db_data:
+  minio_data:

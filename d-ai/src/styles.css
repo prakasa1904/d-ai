@@ -544,6 +544,23 @@ textarea:focus {
   font-size: 1.55rem;
 }
 
+.dashboard-actions {
+  display: flex;
+  align-items: end;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.period-filter {
+  min-width: 150px;
+  gap: 5px;
+}
+
+.period-filter select {
+  height: 40px;
+}
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -610,6 +627,8 @@ textarea:focus {
   grid-template-columns: repeat(7, minmax(0, 1fr));
   align-items: end;
   gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
 }
 
 .daily-column {
@@ -1225,6 +1244,30 @@ textarea:focus {
   margin-bottom: 8px;
 }
 
+.message-files {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -2px 0 10px;
+  font-size: 0.78rem;
+}
+
+.message-files span {
+  color: #66736d;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.message-files strong {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-weight: 800;
+}
+
+.message.user .message-files span {
+  color: rgba(255, 255, 255, 0.78);
+}
+
 .message p {
   margin: 0;
   white-space: pre-wrap;
@@ -1244,6 +1287,61 @@ textarea:focus {
   grid-column: 1 / -1;
 }
 
+.sr-only-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.attachment-tray {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+}
+
+.attachment-pill {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #dbe1d4;
+  border-radius: 8px;
+  background: #f6f7f4;
+}
+
+.attachment-pill.error {
+  border-color: #f1c0ad;
+  background: #fff0eb;
+}
+
+.attachment-pill div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.attachment-pill strong {
+  overflow: hidden;
+  color: #17211f;
+  font-size: 0.9rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-pill span {
+  color: #66736d;
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
 .composer textarea {
   min-height: 48px;
 }
@@ -1255,7 +1353,8 @@ textarea:focus {
 }
 
 .composer .primary-button,
-.composer .stop-button {
+.composer .stop-button,
+.composer .attach-button {
   min-width: 108px;
   height: 48px;
 }
@@ -1330,7 +1429,8 @@ textarea:focus {
   }
 
   .composer .primary-button,
-  .composer .stop-button {
+  .composer .stop-button,
+  .composer .attach-button {
     width: 100%;
   }
 
@@ -1356,6 +1456,16 @@ textarea:focus {
   .dashboard-title {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .dashboard-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .period-filter,
+  .dashboard-actions .primary-button {
+    width: 100%;
   }
 
   .profile-title {

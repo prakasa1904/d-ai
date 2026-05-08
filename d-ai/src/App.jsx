@@ -15,6 +15,7 @@ import {
   syncTokenState,
   updateChat,
   updateMessage,
+  uploadStoreFile,
   getUserProfile,
   hasCasdoorProfileToken,
   refreshCasdoorProfileToken,
@@ -93,6 +94,95 @@ function formatFullTime(value) {
   }).format(date);
 }
 
+const imageFileExtensions = new Set([
+  ".avif",
+  ".bmp",
+  ".gif",
+  ".heic",
+  ".heif",
+  ".jpeg",
+  ".jpg",
+  ".png",
+  ".svg",
+  ".tif",
+  ".tiff",
+  ".webp",
+]);
+
+function attachmentId(file) {
+  return `attachment_${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${file.name}`;
+}
+
+function fileExtension(fileName) {
+  const dotIndex = String(fileName || "").lastIndexOf(".");
+  return dotIndex >= 0 ? String(fileName).slice(dotIndex).toLowerCase() : "";
+}
+
+function isImageFile(file) {
+  const type = file?.type || "";
+  return type.startsWith("image/") || imageFileExtensions.has(fileExtension(file?.name));
+}
+
+function formatFileSize(size) {
+  if (!Number.isFinite(size) || size <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB"];
+  let value = size;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function attachmentImageUrl(attachment) {
+  const record = attachment?.record || {};
+  return attachment?.url
+    || record.url
+    || record.downloadUrl
+    || record.fileUrl
+    || record.objectUrl
+    || "";
+}
+
+function buildAttachmentPrompt(text, attachments) {
+  if (!attachments.length) {
+    return text;
+  }
+
+  const sections = attachments.map((attachment, index) => {
+    const imageUrl = attachmentImageUrl(attachment);
+    const lines = [
+      `Image ${index + 1}: ${attachment.filename}`,
+      `Storage object: ${attachment.objectKey}`,
+      `Size: ${formatFileSize(attachment.size)}`,
+    ];
+
+    if (attachment.type) {
+      lines.push(`Media type: ${attachment.type}`);
+    }
+
+    if (imageUrl) {
+      lines.push(`Image URL: ${imageUrl}`);
+    } else {
+      lines.push("Image URL: unavailable; the image is stored in the selected Casibase store.");
+    }
+
+    return lines.join("\n");
+  });
+
+  return [
+    text || "Please analyze the attached image.",
+    "",
+    "Use these uploaded images as visual context for the answer:",
+    sections.join("\n\n"),
+  ].join("\n");
+}
+
 function startOfToday() {
   const date = new Date();
   date.setHours(0, 0, 0, 0);
@@ -120,32 +210,64 @@ function topEntries(counts, limit = 5) {
     .slice(0, limit);
 }
 
-function buildDailyUsage(messages) {
-  const days = [];
+const dashboardPeriodOptions = [
+  {value: 1, label: "1 day"},
+  {value: 7, label: "7 days"},
+  {value: 30, label: "30 days"},
+  {value: 90, label: "90 days"},
+];
+
+function periodLabel(days) {
+  return dashboardPeriodOptions.find((option) => option.value === days)?.label || `${days} days`;
+}
+
+function rangeStartForDays(days) {
+  const today = startOfToday();
+  const rangeStart = new Date(today);
+  rangeStart.setDate(today.getDate() - Math.max(0, days - 1));
+  return rangeStart;
+}
+
+function dateInRange(value, rangeStart) {
+  const date = new Date(value || "");
+  return !Number.isNaN(date.getTime()) && date >= rangeStart;
+}
+
+function shortDate(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return new Intl.DateTimeFormat(undefined, {month: "short", day: "numeric"}).format(date);
+}
+
+function buildDailyUsage(messages, days = 7) {
+  const series = [];
   const today = startOfToday();
 
-  for (let offset = 6; offset >= 0; offset -= 1) {
+  for (let offset = days - 1; offset >= 0; offset -= 1) {
     const day = new Date(today);
     day.setDate(today.getDate() - offset);
-    days.push({
-      key: day.toISOString().slice(0, 10),
-      label: new Intl.DateTimeFormat(undefined, {weekday: "short"}).format(day),
+    series.push({
+      key: localDateKey(day),
+      label: new Intl.DateTimeFormat(undefined, days <= 7 ? {weekday: "short"} : {month: "short", day: "numeric"}).format(day),
       count: 0,
     });
   }
 
-  const index = new Map(days.map((day) => [day.key, day]));
+  const index = new Map(series.map((day) => [day.key, day]));
   messages.forEach((message) => {
     const date = new Date(message.createdTime || "");
     if (!Number.isNaN(date.getTime())) {
-      const day = index.get(date.toISOString().slice(0, 10));
+      const day = index.get(localDateKey(date));
       if (day) {
         day.count += 1;
       }
     }
   });
 
-  return days;
+  return series;
 }
 
 function localDateKey(date) {
@@ -428,15 +550,15 @@ function UsageBreakdown({title, entries}) {
   );
 }
 
-function DailyActivity({days}) {
+function DailyActivity({days, title}) {
   const max = Math.max(1, ...days.map((day) => day.count));
 
   return (
     <section className="dashboard-section">
       <div className="section-heading">
-        <h2>Last 7 Days</h2>
+        <h2>{title}</h2>
       </div>
-      <div className="daily-chart">
+      <div className="daily-chart" style={{gridTemplateColumns: `repeat(${days.length}, minmax(14px, 1fr))`}}>
         {days.map((day) => (
           <div className="daily-column" key={day.key}>
             <div className="daily-bar" style={{height: `${Math.max(8, (day.count / max) * 100)}%`}} />
@@ -708,6 +830,7 @@ function DashboardPage({account, onLogout, onNavigate}) {
   const [stores, setStores] = useState([]);
   const [chats, setChats] = useState([]);
   const [messagesByChat, setMessagesByChat] = useState({});
+  const [periodDays, setPeriodDays] = useState(7);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
 
@@ -744,19 +867,24 @@ function DashboardPage({account, onLogout, onNavigate}) {
   }, [account]);
 
   const usage = useMemo(() => {
-    const allMessages = Object.values(messagesByChat).flat();
+    const rangeStart = rangeStartForDays(periodDays);
+    const allMessages = Object.values(messagesByChat).flat().filter((message) => dateInRange(message.createdTime, rangeStart));
     const userMessages = allMessages.filter((message) => message.author === account.name);
     const assistantMessages = allMessages.filter((message) => message.author === "AI");
-    const today = startOfToday();
-    const sevenDaysAgo = new Date(today);
-    sevenDaysAgo.setDate(today.getDate() - 6);
-    const messagesToday = allMessages.filter((message) => new Date(message.createdTime || "") >= today);
-    const messagesThisWeek = allMessages.filter((message) => new Date(message.createdTime || "") >= sevenDaysAgo);
     const storeNames = new Map(stores.map((store) => [store.name, store.displayName || store.name]));
-    const chatRows = chats.map((item) => ({
-      ...item,
-      actualMessageCount: messagesByChat[item.name]?.length || item.messageCount || 0,
-    }));
+    const chatRows = chats
+      .map((item) => {
+        const allChatMessages = messagesByChat[item.name] || [];
+        const periodMessages = allChatMessages.filter((message) => dateInRange(message.createdTime, rangeStart));
+        const wasUpdatedInRange = dateInRange(item.updatedTime || item.createdTime, rangeStart);
+
+        return {
+          ...item,
+          actualMessageCount: periodMessages.length,
+          hasPeriodActivity: periodMessages.length > 0 || wasUpdatedInRange,
+        };
+      })
+      .filter((item) => item.hasPeriodActivity);
     const sortedChats = [...chatRows].sort((left, right) => {
       const leftTime = new Date(left.updatedTime || left.createdTime || 0).getTime();
       const rightTime = new Date(right.updatedTime || right.createdTime || 0).getTime();
@@ -764,23 +892,24 @@ function DashboardPage({account, onLogout, onNavigate}) {
     });
     const lastActive = sortedChats[0]?.updatedTime || sortedChats[0]?.createdTime || account.lastSigninTime;
     const modelCounts = countBy(allMessages, (message) => message.modelProvider);
-    const storeCounts = countBy(chats, (item) => storeNames.get(item.store) || item.store);
+    const storeCounts = countBy(chatRows, (item) => storeNames.get(item.store) || item.store);
 
     return {
       allMessages,
       userMessages,
       assistantMessages,
-      messagesToday,
-      messagesThisWeek,
       sortedChats,
       lastActive,
+      rangeStart,
       promptWords: wordsIn(userMessages),
       answerWords: wordsIn(assistantMessages),
       modelEntries: topEntries(modelCounts),
       storeEntries: topEntries(storeCounts),
-      dailyUsage: buildDailyUsage(allMessages),
+      dailyUsage: buildDailyUsage(allMessages, periodDays),
     };
-  }, [account, chats, messagesByChat, stores]);
+  }, [account, chats, messagesByChat, periodDays, stores]);
+
+  const selectedPeriodLabel = periodLabel(periodDays);
 
   return (
     <main className="chat-shell">
@@ -792,24 +921,38 @@ function DashboardPage({account, onLogout, onNavigate}) {
             <p className="eyebrow">Signed in as {account.name}</p>
             <h2>Usage Dashboard</h2>
           </div>
-          <button className="primary-button" disabled={isLoading} onClick={loadUsage}>
-            {isLoading ? "Refreshing..." : "Refresh"}
-          </button>
+          <div className="dashboard-actions">
+            <label className="period-filter">
+              Period
+              <select
+                disabled={isLoading}
+                value={periodDays}
+                onChange={(event) => setPeriodDays(Number(event.target.value))}
+              >
+                {dashboardPeriodOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+            <button className="primary-button" disabled={isLoading} onClick={loadUsage}>
+              {isLoading ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
         </div>
 
         {error ? <div className="error-banner">{error}</div> : null}
 
         <section className="stats-grid" aria-label="Usage totals">
-          <StatCard label="Chats" value={chats.length} detail={`${usage.sortedChats.filter((chat) => chat.actualMessageCount > 0).length} with messages`} />
-          <StatCard label="Messages" value={usage.allMessages.length} detail={`${usage.messagesToday.length} today`} />
+          <StatCard label="Chats" value={usage.sortedChats.length} detail={`${usage.sortedChats.filter((chat) => chat.actualMessageCount > 0).length} with messages`} />
+          <StatCard label="Messages" value={usage.allMessages.length} detail={selectedPeriodLabel} />
           <StatCard label="Prompts" value={usage.userMessages.length} detail={`${usage.promptWords} prompt words`} />
           <StatCard label="Answers" value={usage.assistantMessages.length} detail={`${usage.answerWords} answer words`} />
           <StatCard label="Last active" value={formatChatTime(usage.lastActive)} detail={`Login: ${formatFullTime(account.lastSigninTime)}`} />
-          <StatCard label="This week" value={usage.messagesThisWeek.length} detail="messages in the last 7 days" />
+          <StatCard label="Period" value={selectedPeriodLabel} detail={`Since ${shortDate(usage.rangeStart)}`} />
         </section>
 
         <div className="dashboard-grid">
-          <DailyActivity days={usage.dailyUsage} />
+          <DailyActivity days={usage.dailyUsage} title={`Last ${selectedPeriodLabel}`} />
           <UsageBreakdown title="Model Usage" entries={usage.modelEntries} />
           <UsageBreakdown title="Store Usage" entries={usage.storeEntries} />
 
@@ -1527,6 +1670,12 @@ function MessageList({messages, account, streamingText, reasonText}) {
             <span>{message.author === "AI" ? "Casibase" : displayName(account)}</span>
             <span>{message.modelProvider || ""}</span>
           </div>
+          {message.fileName ? (
+            <div className="message-files">
+              <span>Attachment</span>
+              <strong>{message.fileName}</strong>
+            </div>
+          ) : null}
           <p>{message.text || (message.author === "AI" ? "Thinking..." : "")}</p>
         </article>
       ))}
@@ -1558,7 +1707,9 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
   const [streamingText, setStreamingText] = useState("");
   const [reasonText, setReasonText] = useState("");
   const [selectedTokenId, setSelectedTokenId] = useState("");
+  const [pendingAttachments, setPendingAttachments] = useState([]);
   const closeStreamRef = useRef(null);
+  const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
   const streamStateRef = useRef(null);
 
@@ -1646,6 +1797,92 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
     });
   }, [tokenData.tokens]);
 
+  function updateAttachment(id, updates) {
+    setPendingAttachments((current) => current.map((item) => item.id === id ? {...item, ...updates} : item));
+  }
+
+  async function handleAttachmentChange(event) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+
+    if (!files.length) {
+      return;
+    }
+
+    const acceptedFiles = files.filter(isImageFile);
+    const rejectedFiles = files.filter((file) => !isImageFile(file));
+
+    if (rejectedFiles.length) {
+      setError(`Only image files can be attached. Skipped: ${rejectedFiles.map((file) => file.name).join(", ")}`);
+    } else {
+      setError("");
+    }
+
+    if (!acceptedFiles.length) {
+      return;
+    }
+
+    const nextAttachments = acceptedFiles.map((file) => ({
+      id: attachmentId(file),
+      file,
+      name: file.name,
+      size: file.size,
+      status: "Ready",
+      type: file.type || "",
+      imageStatus: "Image ready",
+    }));
+
+    setPendingAttachments((current) => [...current, ...nextAttachments]);
+  }
+
+  function removeAttachment(id) {
+    setPendingAttachments((current) => current.filter((item) => item.id !== id));
+  }
+
+  async function uploadPendingAttachments(items, activeChat) {
+    if (!items.length) {
+      return [];
+    }
+
+    const key = `d-ai/${account.name}/${activeChat.name}`;
+    const uploaded = [];
+
+    for (const item of items) {
+      if (item.objectKey) {
+        uploaded.push({
+          filename: item.name,
+          objectKey: item.objectKey,
+          size: item.size,
+          type: item.file?.type || "",
+          record: item.record,
+          id: item.id,
+        });
+        continue;
+      }
+
+      updateAttachment(item.id, {status: "Uploading", error: ""});
+
+      try {
+        const upload = await uploadStoreFile({store: selectedStore, file: item.file, key});
+        const attachment = {
+          ...upload,
+          id: item.id,
+        };
+        uploaded.push(attachment);
+        updateAttachment(item.id, {
+          status: "Uploaded",
+          objectKey: upload.objectKey,
+          record: upload.record,
+        });
+      } catch (error) {
+        updateAttachment(item.id, {status: "Failed", error: error.message});
+        throw new Error(`Failed to upload ${item.name}: ${error.message}`);
+      }
+    }
+
+    return uploaded;
+  }
+
   async function newChat() {
     closeStreamRef.current?.();
     closeStreamRef.current = null;
@@ -1653,6 +1890,7 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
     setMessages([]);
     setStreamingText("");
     setReasonText("");
+    setPendingAttachments([]);
     setError("");
   }
 
@@ -1666,9 +1904,12 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
     setError("");
     setStreamingText("");
     setReasonText("");
+    setPendingAttachments([]);
     setChat(nextChat);
-    if (nextChat.store) {
+    if (nextChat.store && stores.some((store) => store.name === nextChat.store)) {
       setStoreName(nextChat.store);
+    } else {
+      setStoreName(chooseStore(stores)?.name || "");
     }
 
     try {
@@ -1800,7 +2041,7 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
     onLogout();
   }
 
-  async function sendPrompt(text) {
+  async function sendPrompt(text, attachmentsToUpload = []) {
     setIsSending(true);
     setStreamingText("");
     setReasonText("");
@@ -1809,6 +2050,12 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
       const usageToken = selectedToken;
       const activeChat = chat || await createChat({account, store: selectedStore});
       setChat(activeChat);
+      const uploadedAttachments = await uploadPendingAttachments(attachmentsToUpload, activeChat);
+      const modelText = buildAttachmentPrompt(text, uploadedAttachments);
+      const messageFileName = uploadedAttachments
+        .map((item) => item.filename)
+        .filter(Boolean)
+        .join(", ");
 
       setMessages((current) => [
         ...current,
@@ -1816,13 +2063,21 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
           owner: "admin",
           name: `local_${Date.now()}`,
           author: account.name,
-          text,
+          text: modelText,
+          fileName: messageFileName,
           modelProvider: selectedStore?.modelProvider || "",
         },
       ]);
 
-      const updatedChat = await sendChatMessage({account, chat: activeChat, store: selectedStore, text});
+      const updatedChat = await sendChatMessage({
+        account,
+        chat: activeChat,
+        store: selectedStore,
+        text: modelText,
+        attachments: uploadedAttachments,
+      });
       setChat(updatedChat);
+      setPendingAttachments((current) => current.filter((item) => !attachmentsToUpload.some((attachment) => attachment.id === item.id)));
       setChats((current) => {
         const next = current.filter((item) => item.name !== updatedChat.name);
         return [updatedChat, ...next];
@@ -1838,7 +2093,7 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
             tokenId: usageToken.id,
             chat: updatedChat,
             messages: nextMessages,
-            promptText: text,
+            promptText: modelText,
           }));
         }
         setIsSending(false);
@@ -1850,7 +2105,7 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
         answer,
         answerText,
         chat: updatedChat,
-        promptText: text,
+        promptText: modelText,
         reasonText: "",
         usageToken,
       };
@@ -1895,7 +2150,7 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
                 chat: updatedChat,
                 messages: finalMessages,
                 answerName: answer.name,
-                promptText: text,
+                promptText: modelText,
               }));
             }
             await loadChats();
@@ -1927,9 +2182,15 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
 
   async function submit(event) {
     event.preventDefault();
-    const text = input.trim();
+    const attachmentsToUpload = pendingAttachments.filter((item) => item.file && item.status !== "Uploading");
+    const text = input.trim() || (attachmentsToUpload.length ? "Please analyze the attached image." : "");
 
     if (!text) {
+      return;
+    }
+
+    if (isSending && attachmentsToUpload.length) {
+      setError("Finish or stop the current stream before sending attachments.");
       return;
     }
 
@@ -1948,7 +2209,7 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
       await interruptStream();
     }
 
-    await sendPrompt(text);
+    await sendPrompt(text, attachmentsToUpload);
   }
 
   function handleInputKeyDown(event) {
@@ -2033,6 +2294,36 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
 
         <form className="composer" onSubmit={submit}>
           {error ? <div className="error-banner">{error}</div> : null}
+          <input
+            ref={fileInputRef}
+            className="sr-only-file"
+            disabled={isLoadingStores || !selectedStore || isSending}
+            accept="image/*"
+            multiple
+            onChange={handleAttachmentChange}
+            type="file"
+          />
+          {pendingAttachments.length ? (
+            <div className="attachment-tray">
+              {pendingAttachments.map((item) => (
+                <div className={`attachment-pill ${item.error ? "error" : ""}`} key={item.id}>
+                  <div>
+                    <strong>{item.name}</strong>
+                    <span>{formatFileSize(item.size)} · {item.status} · {item.imageStatus}</span>
+                    {item.error ? <span>{item.error}</span> : null}
+                  </div>
+                  <button
+                    className="small-button"
+                    disabled={item.status === "Uploading" || isSending}
+                    onClick={() => removeAttachment(item.id)}
+                    type="button"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
           <textarea
             value={input}
             onChange={(event) => setInput(event.target.value)}
@@ -2042,12 +2333,20 @@ function ChatPage({account, onLogout, onNavigate, tokenData, onRecordTokenUsage}
             rows={3}
           />
           <div className="composer-actions">
+            <button
+              className="ghost-button attach-button"
+              disabled={isLoadingStores || !selectedStore || isSending}
+              onClick={() => fileInputRef.current?.click()}
+              type="button"
+            >
+              Attach image
+            </button>
             {isSending ? (
               <button className="ghost-button stop-button" onClick={() => interruptStream()} type="button">
                 Stop
               </button>
             ) : null}
-            <button className="primary-button" disabled={isLoadingStores || !selectedStore || !input.trim()}>
+            <button className="primary-button" disabled={isLoadingStores || !selectedStore || (!input.trim() && !pendingAttachments.length)}>
               {isSending ? "Steer" : "Send"}
             </button>
           </div>

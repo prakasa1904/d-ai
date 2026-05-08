@@ -49,6 +49,16 @@ async function apiPost(base, path, body, headers = {}) {
   return readJson(response);
 }
 
+async function apiPostForm(base, path, formData) {
+  const response = await fetch(`${base}${path}`, {
+    method: "POST",
+    credentials: "include",
+    headers: {"Accept-Language": "en"},
+    body: formData,
+  });
+  return readJson(response);
+}
+
 function assertOk(payload, fallback) {
   if (payload?.status !== "ok") {
     throw new Error(payload?.msg || fallback);
@@ -287,7 +297,41 @@ export async function syncTokenState(account, state) {
 export async function getStores() {
   const result = await apiGet(casibaseBase, `/api/get-store?id=${encodeURIComponent(sharedStoreId)}`);
   const store = assertOk(result, "Failed to load shared store").data;
-  return store ? [store] : [];
+
+  if (!store) {
+    throw new Error(`Shared store ${sharedStoreId} was not found. Update VITE_CASIBASE_SHARED_STORE_ID or restore the Casibase store name.`);
+  }
+
+  return [store];
+}
+
+export async function getStoreFiles(store) {
+  const owner = store?.owner || "admin";
+  const storeName = store?.name || "";
+  const query = new URLSearchParams({owner, store: storeName});
+  const result = await apiGet(casibaseBase, `/api/get-files?${query.toString()}`);
+  return assertOk(result, "Failed to load store files").data || [];
+}
+
+export async function uploadStoreFile({store, file, key = ""}) {
+  if (!store?.name) {
+    throw new Error("Choose a store before uploading a file.");
+  }
+
+  if (!file) {
+    throw new Error("Choose a file before uploading.");
+  }
+
+  const storeId = `${store.owner || "admin"}/${store.name}`;
+  const trimmedKey = String(key || "").replace(/^\/+|\/+$/g, "");
+  const formData = new FormData();
+  formData.append("file", file, file.name);
+  formData.append("storeId", storeId);
+  formData.append("key", trimmedKey);
+  formData.append("filename", file.name);
+
+  const result = await apiPostForm("", "/api/d-ai/upload-file", formData);
+  return assertOk(result, "Failed to upload file").data;
 }
 
 export async function getChats(account) {
@@ -357,10 +401,15 @@ export async function updateMessage(message) {
   return message;
 }
 
-export async function sendChatMessage({account, chat, store, text}) {
+export async function sendChatMessage({account, chat, store, text, attachments = []}) {
   const modelProvider = store?.modelProvider || chat.modelProvider || "";
   const storeName = store?.name || chat.store || "";
   let activeChat = chat;
+  const fileName = attachments
+    .map((item) => item.filename || item.objectKey || "")
+    .filter(Boolean)
+    .join(", ")
+    .slice(0, 100);
 
   if ((modelProvider && chat.modelProvider !== modelProvider) || (storeName && chat.store !== storeName)) {
     activeChat = {
@@ -387,7 +436,7 @@ export async function sendChatMessage({account, chat, store, text}) {
     isDeleted: false,
     isAlerted: false,
     isRegenerated: false,
-    fileName: "",
+    fileName,
     webSearchEnabled: false,
     modelProvider,
   };

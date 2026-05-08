@@ -9,6 +9,20 @@ import {
 const apiModel = "d-ai-casibase";
 const stateDirectory = ".d-ai-state";
 const stateFilename = "tokens.json";
+const imageFileExtensions = new Set([
+  ".avif",
+  ".bmp",
+  ".gif",
+  ".heic",
+  ".heif",
+  ".jpeg",
+  ".jpg",
+  ".png",
+  ".svg",
+  ".tif",
+  ".tiff",
+  ".webp",
+]);
 
 function now() {
   return new Date().toISOString();
@@ -16,6 +30,15 @@ function now() {
 
 function randomName() {
   return Math.random().toString(36).slice(2, 8);
+}
+
+function fileExtension(fileName) {
+  const dotIndex = String(fileName || "").lastIndexOf(".");
+  return dotIndex >= 0 ? String(fileName).slice(dotIndex).toLowerCase() : "";
+}
+
+function isImageUpload({filename, type}) {
+  return String(type || "").startsWith("image/") || imageFileExtensions.has(fileExtension(filename));
 }
 
 function emptyTokenState() {
@@ -131,6 +154,32 @@ async function readJsonBody(request) {
   return JSON.parse(text);
 }
 
+function requestHeaders(headers) {
+  const result = new Headers();
+
+  Object.entries(headers || {}).forEach(([key, value]) => {
+    if (Array.isArray(value)) {
+      value.forEach((item) => result.append(key, item));
+    } else if (value !== undefined) {
+      result.set(key, String(value));
+    }
+  });
+
+  return result;
+}
+
+async function readFormDataBody(request) {
+  const host = request.headers.host || "localhost";
+  const webRequest = new Request(`http://${host}${request.url || "/"}`, {
+    method: request.method,
+    headers: requestHeaders(request.headers),
+    body: request,
+    duplex: "half",
+  });
+
+  return webRequest.formData();
+}
+
 function sendJson(response, status, payload) {
   response.statusCode = status;
   response.setHeader("Content-Type", "application/json");
@@ -208,6 +257,82 @@ function casibaseClient(casibaseTarget) {
       return response.body;
     },
   };
+}
+
+async function loginCasdoorForCode({casdoorTarget, casdoorClientId, casdoorRedirectUri, organization, username, password}) {
+  const state = `d-ai-admin-${Date.now()}-${randomName()}`;
+  const query = new URLSearchParams({
+    clientId: casdoorClientId,
+    responseType: "code",
+    redirectUri: casdoorRedirectUri,
+    type: "code",
+    scope: "profile",
+    state,
+    nonce: "",
+    code_challenge_method: "",
+    code_challenge: "",
+  });
+  const response = await fetch(`${casdoorTarget}/api/login?${query.toString()}`, {
+    method: "POST",
+    headers: {"Content-Type": "text/plain;charset=UTF-8", "Accept-Language": "en"},
+    body: JSON.stringify({
+      username,
+      password,
+      organization,
+      application: "casibase",
+      signinMethod: "Password",
+      type: "code",
+      language: "",
+    }),
+  });
+  const payload = await response.json().catch(() => null);
+
+  if (!response.ok || payload?.status !== "ok" || !payload?.data) {
+    throw new Error(payload?.msg || "Failed to sign in as Casibase upload admin");
+  }
+
+  return {code: payload.data, state};
+}
+
+function cookieHeaderFromResponse(response) {
+  const cookies = response.headers.getSetCookie?.() || [response.headers.get("set-cookie")].filter(Boolean);
+  return cookies.map((cookie) => cookie.split(";")[0]).join("; ");
+}
+
+async function getCasibaseAdminSession({
+  casibaseTarget,
+  casdoorTarget,
+  casdoorClientId,
+  casdoorRedirectUri,
+  adminOrganization,
+  adminUsername,
+  adminPassword,
+}) {
+  if (!adminOrganization || !adminUsername || !adminPassword) {
+    throw new Error("Missing Casibase upload admin credentials");
+  }
+
+  const {code, state} = await loginCasdoorForCode({
+    casdoorTarget,
+    casdoorClientId,
+    casdoorRedirectUri,
+    organization: adminOrganization,
+    username: adminUsername,
+    password: adminPassword,
+  });
+  const response = await fetch(`${casibaseTarget}/api/signin?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`, {
+    method: "POST",
+    headers: {"Content-Type": "text/plain;charset=UTF-8", "Accept-Language": "en"},
+  });
+  const sessionCookie = cookieHeaderFromResponse(response);
+  const payload = await readCasibaseJson(response);
+  assertCasibaseOk(payload, "Failed to open Casibase upload admin session");
+
+  if (!sessionCookie) {
+    throw new Error("Casibase upload admin session did not return a session cookie");
+  }
+
+  return sessionCookie;
 }
 
 async function syncTokenState({request, response, root}) {
@@ -292,6 +417,107 @@ async function exchangeCasdoorToken({request, response, casdoorTarget, casdoorCl
   });
 }
 
+async function uploadChatFile({
+  request,
+  response,
+  casibaseTarget,
+  casdoorTarget,
+  casdoorClientId,
+  casdoorRedirectUri,
+  sharedStoreId,
+  uploadAdmin,
+}) {
+  if (request.method !== "POST") {
+    sendError(response, 405, "Only POST is supported");
+    return;
+  }
+
+  const browserSessionCookie = request.headers.cookie || "";
+  const client = casibaseClient(casibaseTarget);
+  const account = assertCasibaseOk(
+    await client.get("/api/get-account", browserSessionCookie),
+    "Please sign in before uploading files",
+  ).data;
+
+  if (!account?.name) {
+    sendError(response, 401, "Please sign in before uploading files", "authentication_error");
+    return;
+  }
+
+  const formData = await readFormDataBody(request);
+  const file = formData.get("file");
+
+  if (!file || typeof file.arrayBuffer !== "function") {
+    sendError(response, 400, "Missing upload file");
+    return;
+  }
+
+  const storeId = String(formData.get("storeId") || sharedStoreId);
+  if (storeId !== sharedStoreId) {
+    sendError(response, 403, `Uploads are restricted to ${sharedStoreId}`);
+    return;
+  }
+
+  const [, storeName = ""] = storeId.split("/");
+  const rawKey = String(formData.get("key") || `d-ai/${account.name}/${randomName()}`);
+  const key = rawKey.replace(/^\/+|\/+$/g, "");
+  const filename = String(formData.get("filename") || file.name || `upload-${Date.now()}`);
+
+  if (!isImageUpload({filename, type: file.type || ""})) {
+    sendError(response, 400, "Only image files can be uploaded.");
+    return;
+  }
+
+  const objectKey = [key, filename].filter(Boolean).join("/");
+  const adminSessionCookie = await getCasibaseAdminSession({
+    casibaseTarget,
+    casdoorTarget,
+    casdoorClientId,
+    casdoorRedirectUri,
+    adminOrganization: uploadAdmin.organization,
+    adminUsername: uploadAdmin.username,
+    adminPassword: uploadAdmin.password,
+  });
+  const uploadForm = new FormData();
+  uploadForm.append("file", file, filename);
+  const query = new URLSearchParams({
+    store: storeId,
+    key,
+    isLeaf: "1",
+    filename,
+  });
+  const uploadResponse = await fetch(`${casibaseTarget}/api/add-tree-file?${query.toString()}`, {
+    method: "POST",
+    headers: casibaseHeaders(adminSessionCookie),
+    body: uploadForm,
+  });
+  const uploadPayload = await readCasibaseJson(uploadResponse);
+  assertCasibaseOk(uploadPayload, "Failed to upload file");
+
+  let record = null;
+  try {
+    const filesPayload = await client.get(`/api/get-files?owner=admin&store=${encodeURIComponent(storeName)}`, adminSessionCookie);
+    const files = assertCasibaseOk(filesPayload, "Failed to load uploaded file record").data || [];
+    const expectedName = `${storeName}_${objectKey}`;
+    record = files.find((item) => item.name === expectedName)
+      || files.find((item) => item.filename === filename && item.store === storeName)
+      || null;
+  } catch {
+    record = null;
+  }
+
+  sendJson(response, 200, {
+    status: "ok",
+    data: {
+      filename,
+      objectKey,
+      size: Number(file.size || 0),
+      type: file.type || "",
+      record,
+    },
+  });
+}
+
 function getBearerToken(request) {
   const header = request.headers.authorization || "";
   const match = /^Bearer\s+(.+)$/i.exec(header);
@@ -343,7 +569,13 @@ function promptFromOpenAiMessages(messages) {
 
 async function chooseStore(client, sessionCookie, sharedStoreId) {
   const result = await client.get(`/api/get-store?id=${encodeURIComponent(sharedStoreId)}`, sessionCookie);
-  return assertCasibaseOk(result, "Failed to load shared store").data || null;
+  const store = assertCasibaseOk(result, "Failed to load shared store").data || null;
+
+  if (!store) {
+    throw new Error(`Shared store ${sharedStoreId} was not found. Update VITE_CASIBASE_SHARED_STORE_ID or restore the Casibase store name.`);
+  }
+
+  return store;
 }
 
 async function createChat(client, account, store, sessionCookie) {
@@ -718,7 +950,8 @@ function installMiddleware(server, options) {
   const casdoorClientId = options.casdoorClientId;
   const casdoorClientSecret = options.casdoorClientSecret;
   const casdoorRedirectUri = options.casdoorRedirectUri;
-  const sharedStoreId = options.sharedStoreId || "admin/store-built-in";
+  const sharedStoreId = options.sharedStoreId || "admin/ifm-v0";
+  const uploadAdmin = options.uploadAdmin || {};
 
   server.middlewares.use(async (request, response, next) => {
     try {
@@ -737,6 +970,20 @@ function installMiddleware(server, options) {
           casdoorClientId,
           casdoorClientSecret,
           casdoorRedirectUri,
+        });
+        return;
+      }
+
+      if (url.pathname === "/api/d-ai/upload-file") {
+        await uploadChatFile({
+          request,
+          response,
+          casibaseTarget,
+          casdoorTarget,
+          casdoorClientId,
+          casdoorRedirectUri,
+          sharedStoreId,
+          uploadAdmin,
         });
         return;
       }
