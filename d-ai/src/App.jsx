@@ -35,6 +35,8 @@ import {
   normalizeTokenLimits,
 } from "./tokens";
 
+const appLocale = "en-US";
+
 function displayName(account) {
   return account?.displayName || account?.name || "User";
 }
@@ -70,11 +72,30 @@ function formatChatTime(value) {
     return "";
   }
 
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(appLocale, {
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+  }).format(date);
+}
+
+function formatChatTimeWithSeconds(value) {
+  if (!value) {
+    return "";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return new Intl.DateTimeFormat(appLocale, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
   }).format(date);
 }
 
@@ -88,7 +109,7 @@ function formatFullTime(value) {
     return "Never";
   }
 
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(appLocale, {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(date);
@@ -239,7 +260,7 @@ function shortDate(value) {
     return "";
   }
 
-  return new Intl.DateTimeFormat(undefined, {month: "short", day: "numeric"}).format(date);
+  return new Intl.DateTimeFormat(appLocale, {month: "short", day: "numeric"}).format(date);
 }
 
 function buildDailyUsage(messages, days = 7) {
@@ -251,7 +272,7 @@ function buildDailyUsage(messages, days = 7) {
     day.setDate(today.getDate() - offset);
     series.push({
       key: localDateKey(day),
-      label: new Intl.DateTimeFormat(undefined, days <= 7 ? {weekday: "short"} : {month: "short", day: "numeric"}).format(day),
+      label: new Intl.DateTimeFormat(appLocale, days <= 7 ? {weekday: "short"} : {month: "short", day: "numeric"}).format(day),
       count: 0,
     });
   }
@@ -287,7 +308,7 @@ function buildTokenUsageSeries(usage, days = 14) {
     date.setDate(today.getDate() - offset);
     series.push({
       key: localDateKey(date),
-      label: new Intl.DateTimeFormat(undefined, {month: "short", day: "numeric"}).format(date),
+      label: new Intl.DateTimeFormat(appLocale, {month: "short", day: "numeric"}).format(date),
       requests: 0,
       promptTokens: 0,
       responseTokens: 0,
@@ -333,7 +354,7 @@ function buildMonitoringBuckets(days) {
       date.setHours(hour, 0, 0, 0);
       return {
         key: localHourKey(date),
-        label: new Intl.DateTimeFormat(undefined, {hour: "2-digit"}).format(date),
+        label: new Intl.DateTimeFormat(appLocale, {hour: "2-digit"}).format(date),
         success: 0,
         failed: 0,
         total: 0,
@@ -349,7 +370,7 @@ function buildMonitoringBuckets(days) {
     date.setDate(today.getDate() - offset);
     return {
       key: localDateKey(date),
-      label: new Intl.DateTimeFormat(undefined, days <= 7 ? {weekday: "short"} : {month: "short", day: "numeric"}).format(date),
+      label: new Intl.DateTimeFormat(appLocale, days <= 7 ? {weekday: "short"} : {month: "short", day: "numeric"}).format(date),
       success: 0,
       failed: 0,
       total: 0,
@@ -662,7 +683,7 @@ function requestLogHttpStatus(entry) {
 
 function requestLogLatency(entry) {
   const latencyMs = Number(entry.latencyMs || 0);
-  return latencyMs > 0 ? `${latencyMs.toLocaleString()} ms` : "No latency";
+  return latencyMs > 0 ? `${latencyMs.toLocaleString(appLocale)} ms` : "No latency";
 }
 
 function formatPercent(value) {
@@ -903,7 +924,7 @@ function UsageBreakdown({title, entries}) {
   );
 }
 
-function TimeseriesLineChart({series, lines, maxValue, valueFormatter = (value) => value.toLocaleString()}) {
+function TimeseriesLineChart({series, lines, maxValue, valueFormatter = (value) => value.toLocaleString(appLocale)}) {
   const width = 720;
   const height = 240;
   const padding = {top: 18, right: 20, bottom: 34, left: 46};
@@ -1179,7 +1200,7 @@ function ApiReference({token, onCopy}) {
 }
 
 function limitText(value) {
-  return value > 0 ? value.toLocaleString() : "Unlimited";
+  return value > 0 ? value.toLocaleString(appLocale) : "Unlimited";
 }
 
 function limitCheckFor(tokenMetrics, tokenId, key = "totalTokens") {
@@ -1206,7 +1227,7 @@ function LimitMeter({label, used, limit, missing}) {
     <div className={`limit-meter ${missing ? "missing" : ""}`}>
       <div>
         <span>{label}</span>
-        <strong>{used.toLocaleString()} / {limitText(limit)}</strong>
+        <strong>{used.toLocaleString(appLocale)} / {limitText(limit)}</strong>
       </div>
       <div className="limit-track">
         <div className={`limit-fill ${isExceeded ? "exceeded" : ""}`} style={{width: `${percent}%`}} />
@@ -1428,7 +1449,7 @@ function TokenRequestLog({events, token, onCopy, periodLabelText}) {
             </div>
             <div>
               <span>Tokens</span>
-              <strong>{summary.totalTokens.toLocaleString()}</strong>
+              <strong>{summary.totalTokens.toLocaleString(appLocale)}</strong>
             </div>
             <div>
               <span>Last seen</span>
@@ -1460,8 +1481,8 @@ function TokenRequestLog({events, token, onCopy, periodLabelText}) {
                     <small>{entry.modelProvider || "No provider recorded"}</small>
                   </span>
                   <span>
-                    <strong>{Number(entry.totalTokens || 0).toLocaleString()} tokens</strong>
-                    <small>{Number(entry.promptTokens || 0).toLocaleString()} in · {Number(entry.responseTokens || 0).toLocaleString()} out</small>
+                    <strong>{Number(entry.totalTokens || 0).toLocaleString(appLocale)} tokens</strong>
+                    <small>{Number(entry.promptTokens || 0).toLocaleString(appLocale)} in · {Number(entry.responseTokens || 0).toLocaleString(appLocale)} out</small>
                   </span>
                   <span>{requestLogLatency(entry)}</span>
                   <span>{requestLogDetail(entry)}</span>
@@ -1948,10 +1969,11 @@ function ProfilePage({account, onAccountUpdated, onLogout, onNavigate}) {
   );
 }
 
-function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteToken, onLogout, onNavigate}) {
+function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteToken, onLogout, onNavigate, onRefreshTokenState}) {
   const [name, setName] = useState("");
   const [tokenLimit, setTokenLimit] = useState("");
   const [formError, setFormError] = useState("");
+  const [refreshError, setRefreshError] = useState("");
   const [notice, setNotice] = useState("");
   const [periodDays, setPeriodDays] = useState(7);
   const [selectedSeriesTokenId, setSelectedSeriesTokenId] = useState("all");
@@ -1961,7 +1983,11 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
   const [requestLogError, setRequestLogError] = useState("");
   const [isLoadingMetrics, setIsLoadingMetrics] = useState(false);
   const [isLoadingRequestLogs, setIsLoadingRequestLogs] = useState(false);
+  const [isRefreshingPage, setIsRefreshingPage] = useState(false);
   const [isMutatingToken, setIsMutatingToken] = useState(false);
+  const [isCreateTokenOpen, setIsCreateTokenOpen] = useState(false);
+  const [pageRefreshKey, setPageRefreshKey] = useState(0);
+  const [requestLogsRefreshKey, setRequestLogsRefreshKey] = useState(0);
   const metricsTokenKey = useMemo(
     () => tokenData.tokens.map((token) => `${token.id}:${token.status || ""}:${token.lastUsedAt || ""}`).join("|"),
     [tokenData.tokens],
@@ -2021,12 +2047,32 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
       const token = await onCreateToken(name, {totalTokens});
       setName("");
       setTokenLimit("");
+      setIsCreateTokenOpen(false);
       setNotice(`${token.name} created`);
     } catch (error) {
       setFormError(error.message);
     } finally {
       setIsMutatingToken(false);
     }
+  }
+
+  function openCreateTokenModal() {
+    setName("");
+    setTokenLimit("");
+    setFormError("");
+    setNotice("");
+    setIsCreateTokenOpen(true);
+  }
+
+  function closeCreateTokenModal() {
+    if (isMutatingToken) {
+      return;
+    }
+
+    setName("");
+    setTokenLimit("");
+    setFormError("");
+    setIsCreateTokenOpen(false);
   }
 
   async function deleteToken(token) {
@@ -2057,6 +2103,24 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
       setFormError(error.message);
     } finally {
       setIsMutatingToken(false);
+    }
+  }
+
+  function refreshRecentTokenRequests() {
+    setRequestLogsRefreshKey((current) => current + 1);
+  }
+
+  async function refreshTokenPage() {
+    setIsRefreshingPage(true);
+    setRefreshError("");
+
+    try {
+      await onRefreshTokenState();
+      setPageRefreshKey((current) => current + 1);
+    } catch (error) {
+      setRefreshError(error.message);
+    } finally {
+      setIsRefreshingPage(false);
     }
   }
 
@@ -2092,7 +2156,7 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
     return () => {
       active = false;
     };
-  }, [periodDays, selectedSeriesTokenId, metricsTokenKey]);
+  }, [periodDays, selectedSeriesTokenId, metricsTokenKey, pageRefreshKey]);
 
   useEffect(() => {
     let active = true;
@@ -2120,7 +2184,7 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
     return () => {
       active = false;
     };
-  }, [periodDays, metricsTokenKey]);
+  }, [periodDays, metricsTokenKey, pageRefreshKey, requestLogsRefreshKey]);
 
   return (
     <main className="chat-shell">
@@ -2144,35 +2208,77 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
                 ))}
               </select>
             </label>
-            <form className="token-form" onSubmit={submit}>
-              <input
-                aria-label="Token name"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder="Token name"
-              />
-              <input
-                aria-label="Token entitlement quota"
-                inputMode="numeric"
-                min="0"
-                type="number"
-                value={tokenLimit}
-                onChange={(event) => setTokenLimit(event.target.value)}
-                placeholder="Entitlement optional"
-              />
-              <button className="primary-button" disabled={isMutatingToken}>
-                {isMutatingToken ? "Saving..." : "Create token"}
-              </button>
-            </form>
+            <label className="period-filter">
+              Token
+              <select
+                value={selectedSeriesTokenId}
+                onChange={(event) => setSelectedSeriesTokenId(event.target.value)}
+              >
+                <option value="all">All tokens</option>
+                {tokenData.tokens.map((token) => (
+                  <option key={token.id} value={token.id}>{token.name}</option>
+                ))}
+              </select>
+            </label>
+            <button className="ghost-button" disabled={isRefreshingPage || isLoadingMetrics || isLoadingRequestLogs} onClick={refreshTokenPage} type="button">
+              {isRefreshingPage || isLoadingMetrics || isLoadingRequestLogs ? "Refreshing..." : "Refresh"}
+            </button>
           </div>
         </div>
 
-        {formError ? <div className="error-banner">{formError}</div> : null}
+        {formError && !isCreateTokenOpen ? <div className="error-banner">{formError}</div> : null}
+        {refreshError ? <div className="error-banner">{refreshError}</div> : null}
         {metricsError ? <div className="error-banner">{metricsError}</div> : null}
         {requestLogError ? <div className="error-banner">{requestLogError}</div> : null}
         {notice ? <div className="success-banner">{notice}</div> : null}
         {isLoadingMetrics ? <p className="side-note">Refreshing OpenMeter metrics...</p> : null}
         {isLoadingRequestLogs ? <p className="side-note">Refreshing ClickHouse request logs...</p> : null}
+
+        {isCreateTokenOpen ? (
+          <div className="modal-backdrop">
+            <section className="token-modal" role="dialog" aria-modal="true" aria-labelledby="create-token-title">
+              <div className="modal-heading">
+                <div>
+                  <p className="eyebrow">Token access</p>
+                  <h2 id="create-token-title">Create Token</h2>
+                </div>
+                <button className="ghost-button" disabled={isMutatingToken} onClick={closeCreateTokenModal} type="button">Close</button>
+              </div>
+
+              {formError ? <div className="error-banner">{formError}</div> : null}
+
+              <form className="token-modal-form" onSubmit={submit}>
+                <label>
+                  Token name
+                  <input
+                    autoFocus
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                    placeholder="Production client"
+                  />
+                </label>
+                <label>
+                  Token entitlement quota
+                  <input
+                    inputMode="numeric"
+                    min="0"
+                    type="number"
+                    value={tokenLimit}
+                    onChange={(event) => setTokenLimit(event.target.value)}
+                    placeholder="Unlimited"
+                  />
+                </label>
+                <p className="side-note">Leave quota empty for unlimited. Limits are stored in OpenMeter customer entitlements.</p>
+                <div className="modal-actions">
+                  <button className="ghost-button" disabled={isMutatingToken} onClick={closeCreateTokenModal} type="button">Cancel</button>
+                  <button className="primary-button" disabled={isMutatingToken} type="submit">
+                    {isMutatingToken ? "Creating..." : "Create token"}
+                  </button>
+                </div>
+              </form>
+            </section>
+          </div>
+        ) : null}
 
         <section className="stats-grid" aria-label="Token totals">
           <StatCard label="Tokens" value={tokenData.tokens.length} detail={`${tokenData.tokens.filter(isTokenActive).length} active`} />
@@ -2194,9 +2300,9 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
           <TokenUsageTimeseries
             periodLabelText={selectedPeriodLabel}
             selectedTokenId={selectedSeriesTokenId}
+            showTokenSelector={false}
             series={usageSeries}
             tokens={tokenData.tokens}
-            onSelectedTokenId={setSelectedSeriesTokenId}
           />
 
           <UsageBreakdown title="Failure Breakdown" entries={failures} />
@@ -2205,6 +2311,7 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
         <section className="dashboard-section token-section">
           <div className="section-heading">
             <h2>Tokens</h2>
+            <button className="primary-button" onClick={openCreateTokenModal} type="button">Create token</button>
           </div>
           {tokenData.tokens.length === 0 ? (
             <p className="side-note">No tokens yet.</p>
@@ -2248,13 +2355,25 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
 
         <section className="dashboard-section token-section">
           <div className="section-heading">
-            <h2>Recent Token Requests</h2>
-            <p className="side-note">{selectedPeriodLabel}</p>
+            <div>
+              <h2>Recent Token Requests</h2>
+              <p className="side-note">{selectedPeriodLabel}</p>
+            </div>
+            <button className="small-button" disabled={isLoadingRequestLogs} onClick={refreshRecentTokenRequests} type="button">
+              {isLoadingRequestLogs ? "Refreshing..." : "Refresh"}
+            </button>
           </div>
           {recentUsage.length === 0 ? (
             <p className="side-note">No token requests in this time window yet.</p>
           ) : (
             <div className="recent-table">
+              <div className="recent-row token-usage-row recent-head" aria-hidden="true">
+                <span>Token</span>
+                <span>Status</span>
+                <span>Usage / Error</span>
+                <span>Context</span>
+                <span>Time</span>
+              </div>
               {recentUsage.map((entry) => {
                 const token = tokenData.tokens.find((item) => item.id === entry.tokenId);
 
@@ -2264,7 +2383,7 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
                     <span>{entry.status === "success" ? "Success" : "Failed"}</span>
                     <span>{entry.status === "success" ? `${entry.totalTokens || 0} tokens` : (entry.errorMessage || entry.errorType || "Failed")}</span>
                     <span>{entry.chatTitle || entry.chatName || entry.failureStage || entry.source}</span>
-                    <span>{formatChatTime(entry.createdAt)}</span>
+                    <span>{formatChatTimeWithSeconds(entry.createdAt)}</span>
                   </div>
                 );
               })}
@@ -3518,6 +3637,10 @@ export default function App() {
     applyTokenMutation(await mutateTokenState("delete-token", {tokenId}));
   }
 
+  async function refreshManagedTokenState() {
+    return applyTokenState(await getServerTokenState());
+  }
+
   function recordManagedTokenUsage(entry) {
     mutateTokenState("record-usage", {entry})
       .then(applyTokenMutation)
@@ -3594,6 +3717,7 @@ export default function App() {
         onDeleteToken={deleteManagedToken}
         onLogout={() => setAccount(null)}
         onNavigate={navigate}
+        onRefreshTokenState={refreshManagedTokenState}
         onToggleToken={toggleManagedToken}
       />
     );

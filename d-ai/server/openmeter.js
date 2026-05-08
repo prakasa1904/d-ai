@@ -1,5 +1,7 @@
 import {normalizeTokenLimits} from "../src/tokens.js";
 
+const appLocale = "en-US";
+
 function now() {
   return new Date();
 }
@@ -79,7 +81,7 @@ function buildMetricBuckets(periodDays) {
       date.setHours(hour, 0, 0, 0);
       return {
         key: localHourKey(date),
-        label: new Intl.DateTimeFormat(undefined, {hour: "2-digit"}).format(date),
+        label: new Intl.DateTimeFormat(appLocale, {hour: "2-digit"}).format(date),
         requests: 0,
         promptTokens: 0,
         responseTokens: 0,
@@ -100,7 +102,7 @@ function buildMetricBuckets(periodDays) {
     date.setDate(today.getDate() - offset);
     return {
       key: localDateKey(date),
-      label: new Intl.DateTimeFormat(undefined, Number(periodDays) <= 7 ? {weekday: "short"} : {month: "short", day: "numeric"}).format(date),
+      label: new Intl.DateTimeFormat(appLocale, Number(periodDays) <= 7 ? {weekday: "short"} : {month: "short", day: "numeric"}).format(date),
       requests: 0,
       promptTokens: 0,
       responseTokens: 0,
