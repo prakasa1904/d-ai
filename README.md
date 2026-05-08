@@ -16,28 +16,34 @@ Custom React frontend for a local Casdoor + Casibase + OpenMeter + ClickHouse st
 
 ## Bootstrap
 
-Start Casdoor first, seed the required Casdoor data, then start Casibase, MinIO, OpenMeter, and the D-AI logging stack:
+Run the combined bootstrap script:
 
 ```bash
 cd /Users/nedya.prakasa/Projects/casibase
-docker compose up -d casdoor-db casdoor
-./scripts/seed-casdoor.sh
-docker compose up -d casibase-db minio minio-init openmeter openmeter-sink-worker openmeter-balance-worker d-ai-clickhouse d-ai-otel-collector casibase
-./scripts/seed-casibase-minio-store.sh
+./scripts/bootstrap.sh
 ```
 
-If Casibase was already running before the seed:
+The script checks Docker, Docker Compose, Node.js, and npm; adds `casdoor.local` and `casibase.local` to `/etc/hosts` when missing; starts services in dependency order; waits for databases and HTTP endpoints; runs the Casdoor and Casibase MinIO seeds; restarts Casibase; installs/builds D-AI; and starts the D-AI dev server on port `5174`.
+
+If `/etc/hosts` is missing the local names, the script may ask for your sudo password. To manage hosts manually or skip that step:
 
 ```bash
-docker compose restart casibase
+./scripts/bootstrap.sh --skip-hosts
 ```
 
-Start the D-AI frontend:
+Useful options:
 
 ```bash
-cd /Users/nedya.prakasa/Projects/casibase/d-ai
-npm install
-npm run dev
+./scripts/bootstrap.sh --no-start-dai
+./scripts/bootstrap.sh --no-dai
+DAI_PORT=5175 ./scripts/bootstrap.sh
+```
+
+Stop the D-AI frontend:
+
+```bash
+./scripts/stop-dai.sh
+DAI_PORT=5175 ./scripts/stop-dai.sh
 ```
 
 Open the URL printed by Vite. The usual local URL is:
