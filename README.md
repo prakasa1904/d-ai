@@ -71,6 +71,7 @@ Application: built-in/casibase
 Default user: ifm/user
 Default password: user
 Casdoor storage provider: admin/provider-storage-ifm-minio-v1
+Casibase shared store: admin/ifm-v0
 Casibase MinIO demo store: admin/ifm-minio-v0
 ```
 
