@@ -3,7 +3,6 @@ import path from "node:path";
 import crypto from "node:crypto";
 import {
   estimateTokenCount,
-  getTokenLimitStatus,
   normalizeTokenLimits,
 } from "../src/tokens.js";
 import {createOpenMeterClient} from "./openmeter.js";
@@ -80,17 +79,10 @@ function publicAccount(account) {
 }
 
 function normalizeToken(token) {
-  return {
-    ...token,
-    limits: normalizeTokenLimits(token?.limits),
-  };
-}
+  const {limits, entitlementSync, ...rest} = token || {};
 
-function normalizeState(state) {
   return {
-    ...emptyTokenState(),
-    ...state,
-    tokens: Array.isArray(state?.tokens) ? state.tokens.map(normalizeToken) : [],
+    ...rest,
   };
 }
 
@@ -104,7 +96,7 @@ function privateToken(token, account, sessionCookie) {
 }
 
 function publicToken(token) {
-  const {account, sessionCookie, updatedAt, ...rest} = token;
+  const {account, sessionCookie, updatedAt, limits, entitlementSync, ...rest} = token;
   return rest;
 }
 
@@ -164,7 +156,13 @@ function failureRequestEvent({tokenId, source = "chat", httpStatus = 500, errorT
 }
 
 async function effectiveTokenLimitStatus({token, accountState, pendingTokens = 0, openMeter}) {
-  const localStatus = getTokenLimitStatus(token, [], pendingTokens);
+  const localStatus = {
+    allowed: true,
+    reasons: [],
+    checks: [],
+    stats: null,
+    limits: {},
+  };
 
   if (!openMeter?.enabled) {
     return localStatus;
@@ -269,7 +267,7 @@ function ensureAccountState(state, account, sessionCookie) {
   return {key, accountState};
 }
 
-function createServerToken(name, limits, account, sessionCookie) {
+function createServerToken(name, account, sessionCookie) {
   const createdAt = now();
   const suffix = randomName();
   return privateToken({
@@ -279,7 +277,6 @@ function createServerToken(name, limits, account, sessionCookie) {
     status: "Active",
     createdAt,
     lastUsedAt: "",
-    limits: normalizeTokenLimits(limits),
     updatedAt: createdAt,
   }, account, sessionCookie);
 }
@@ -485,7 +482,7 @@ async function getCasibaseAdminSession({
   return sessionCookie;
 }
 
-async function syncTokenState({request, response, root, casibaseTarget}) {
+async function tokenState({request, response, root, casibaseTarget}) {
   if (request.method === "GET") {
     const {account, sessionCookie} = await signedInAccount({request, casibaseTarget});
     const state = await loadServerState(root);
@@ -501,17 +498,8 @@ async function syncTokenState({request, response, root, casibaseTarget}) {
   }
 
   const {account, sessionCookie} = await signedInAccount({request, casibaseTarget});
-  const body = await readJsonBody(request);
-  const incoming = normalizeState(body.state);
   const state = await loadServerState(root);
   const {accountState} = ensureAccountState(state, account, sessionCookie);
-
-  // Legacy bootstrap: if the server does not have tokens yet, import the browser cache once.
-  // After that, server-side token actions are authoritative and stale browser snapshots
-  // cannot silently overwrite updated limits.
-  if (accountState.tokens.length === 0 && incoming.tokens.length > 0) {
-    accountState.tokens = incoming.tokens.map((token) => privateToken(token, account, sessionCookie));
-  }
   accountState.updatedAt = now();
 
   await saveServerState(root, state);
@@ -530,9 +518,12 @@ async function mutateTokenState({request, response, root, casibaseTarget, openMe
   const {accountState} = ensureAccountState(state, account, sessionCookie);
   let changedToken = null;
   let changedUsageEntry = null;
+  let requestedLimits = null;
+  let deletedToken = null;
 
   if (body.action === "create-token") {
-    changedToken = createServerToken(body.name, body.limits, account, sessionCookie);
+    changedToken = createServerToken(body.name, account, sessionCookie);
+    requestedLimits = normalizeTokenLimits(body.limits);
     accountState.tokens = [changedToken, ...accountState.tokens];
   } else if (body.action === "toggle-token") {
     accountState.tokens = accountState.tokens.map((token) => {
@@ -555,13 +546,14 @@ async function mutateTokenState({request, response, root, casibaseTarget, openMe
 
       changedToken = {
         ...token,
-        limits: normalizeTokenLimits(body.limits),
         updatedAt: now(),
       };
       return changedToken;
     });
+    requestedLimits = normalizeTokenLimits(body.limits);
   } else if (body.action === "delete-token") {
-    const existed = accountState.tokens.some((token) => token.id === body.tokenId);
+    deletedToken = accountState.tokens.find((token) => token.id === body.tokenId) || null;
+    const existed = Boolean(deletedToken);
     accountState.tokens = accountState.tokens.filter((token) => token.id !== body.tokenId);
     changedToken = existed ? {id: body.tokenId} : null;
   } else if (body.action === "record-usage") {
@@ -616,6 +608,32 @@ async function mutateTokenState({request, response, root, casibaseTarget, openMe
   if (["toggle-token", "update-token-limits"].includes(body.action) && !changedToken) {
     sendError(response, 404, "Token was not found");
     return;
+  }
+
+  if (["create-token", "update-token-limits"].includes(body.action) && changedToken) {
+    if (!openMeter?.enabled) {
+      sendError(response, 503, "OpenMeter customer entitlements are required for token limits", "openmeter_required");
+      return;
+    }
+
+    try {
+      const entitlementSync = await openMeter.syncTokenEntitlements({
+        token: changedToken,
+        account: accountState.account,
+        limits: requestedLimits,
+        removeUnlimited: body.action === "update-token-limits",
+      });
+    } catch (error) {
+      sendError(response, 502, `OpenMeter entitlement sync failed: ${error.message}`, "openmeter_entitlement_sync_failed");
+      return;
+    }
+  }
+
+  if (body.action === "delete-token" && deletedToken && openMeter?.enabled) {
+    openMeter.deleteTokenEntitlements({
+      token: deletedToken,
+      account: accountState.account,
+    }).catch(() => null);
   }
 
   accountState.updatedAt = now();
@@ -1822,7 +1840,7 @@ function installMiddleware(server, options) {
       const url = new URL(request.url || "/", "http://localhost");
 
       if (url.pathname === "/api/d-ai/token-state") {
-        await syncTokenState({request, response, root, casibaseTarget});
+        await tokenState({request, response, root, casibaseTarget});
         return;
       }
 

@@ -289,11 +289,6 @@ export async function signOut() {
   await apiPost(casdoorBase, "/api/logout").catch(() => null);
 }
 
-export async function syncTokenState(account, state) {
-  const result = await apiPost("", "/api/d-ai/token-state", {account, state});
-  return assertOk(result, "Failed to sync token state").data || state;
-}
-
 export async function getServerTokenState() {
   const result = await apiGet("", "/api/d-ai/token-state");
   return assertOk(result, "Failed to load token state").data;

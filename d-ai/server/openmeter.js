@@ -152,6 +152,13 @@ function publicConfig(config) {
     eventType: config.eventType,
     subjectMode: config.subjectMode,
     failClosed: config.failClosed,
+    entitlementsEnabled: config.entitlementsEnabled,
+    totalTokensFeatureKey: config.totalTokensFeatureKey,
+    requestsPerMinuteFeatureKey: config.requestsPerMinuteFeatureKey,
+    requestsPerHourFeatureKey: config.requestsPerHourFeatureKey,
+    tokensPerDayFeatureKey: config.tokensPerDayFeatureKey,
+    requestsPerDayFeatureKey: config.requestsPerDayFeatureKey,
+    totalTokensEntitlementPeriod: config.totalTokensEntitlementPeriod,
   };
 }
 
@@ -267,6 +274,48 @@ function formatLimitCheck({key, label, used, projected, limit, source = "openmet
   };
 }
 
+function entitlementConfigLimit(value) {
+  try {
+    const parsed = JSON.parse(value?.config || "{}");
+    return Math.max(0, Math.floor(Number(parsed.limit || 0)));
+  } catch {
+    return 0;
+  }
+}
+
+function formatEntitlementLimitCheck({definition, value, used: usedOverride, pending = 0, fallbackLimit = 0, customerKey = ""}) {
+  const used = Number(value?.usage ?? usedOverride ?? 0);
+  const limit = Number(value?.totalAvailableGrantAmount || entitlementConfigLimit(value) || fallbackLimit || 0);
+  const projected = used + Number(pending || 0);
+  const balance = Number(value?.balance ?? Math.max(0, limit - used));
+  const blocked = limit > 0 && (value?.hasAccess === false || projected > limit || balance < Number(pending || 0));
+
+  return {
+    key: definition.key,
+    label: definition.label,
+    used,
+    projected,
+    limit,
+    source: "openmeter-customer-entitlement",
+    exceeded: blocked,
+    missing: false,
+    blocked,
+    remaining: Math.max(0, Math.min(balance, limit > 0 ? limit - used : balance)),
+    customerKey,
+    featureKey: definition.featureKey,
+    hasAccess: value?.hasAccess === undefined ? !blocked : value.hasAccess !== false,
+  };
+}
+
+function entitlementPeriod(value, fallback) {
+  const period = String(value || fallback || "MONTH").trim().toUpperCase();
+  return ["DAY", "WEEK", "MONTH", "YEAR"].includes(period) || /^P/i.test(period) ? period : fallback;
+}
+
+function sameNumber(left, right) {
+  return Math.abs(Number(left || 0) - Number(right || 0)) < 0.000001;
+}
+
 export function createOpenMeterClient(options = {}) {
   const baseUrl = trimTrailingSlash(options.baseUrl);
   const config = {
@@ -284,7 +333,78 @@ export function createOpenMeterClient(options = {}) {
       ? "account"
       : "token",
     failClosed: normalizeBoolean(options.failClosed, false),
+    entitlementsEnabled: normalizeBoolean(options.entitlementsEnabled, true),
+    totalTokensFeatureKey: String(options.totalTokensFeatureKey || "d_ai_token_quota"),
+    requestsPerMinuteFeatureKey: String(options.requestsPerMinuteFeatureKey || "d_ai_minute_requests"),
+    requestsPerHourFeatureKey: String(options.requestsPerHourFeatureKey || "d_ai_hourly_requests"),
+    tokensPerDayFeatureKey: String(options.tokensPerDayFeatureKey || "d_ai_daily_tokens"),
+    requestsPerDayFeatureKey: String(options.requestsPerDayFeatureKey || "d_ai_daily_requests"),
+    totalTokensEntitlementPeriod: entitlementPeriod(options.totalTokensEntitlementPeriod, "P100Y"),
   };
+  const ensuredFeatures = new Set();
+
+  const entitlementDefinitions = [
+    {
+      key: "totalTokens",
+      label: "Token entitlement quota",
+      featureKey: config.totalTokensFeatureKey,
+      featureName: "D-AI Token Entitlement Quota",
+      entitlementType: "metered",
+      meterSlug: config.meterSlug,
+      period: config.totalTokensEntitlementPeriod,
+      measureUsageFrom: "1970-01-01T00:00:00.000Z",
+      preserveOverageAtReset: true,
+      pending: (pendingTokens) => Number(pendingTokens || 0),
+    },
+    {
+      key: "requestsPerMinute",
+      label: "Requests / minute entitlement",
+      featureKey: config.requestsPerMinuteFeatureKey,
+      featureName: "D-AI Minute Request Entitlement",
+      entitlementType: "static",
+      meterSlug: config.requestMeterSlug,
+      period: "PT1M",
+      measureUsageFrom: "CURRENT_PERIOD_START",
+      preserveOverageAtReset: false,
+      pending: () => 1,
+    },
+    {
+      key: "requestsPerHour",
+      label: "Requests / hour entitlement",
+      featureKey: config.requestsPerHourFeatureKey,
+      featureName: "D-AI Hourly Request Entitlement",
+      entitlementType: "static",
+      meterSlug: config.requestMeterSlug,
+      period: "PT1H",
+      measureUsageFrom: "CURRENT_PERIOD_START",
+      preserveOverageAtReset: false,
+      pending: () => 1,
+    },
+    {
+      key: "requestsPerDay",
+      label: "Requests / day entitlement",
+      featureKey: config.requestsPerDayFeatureKey,
+      featureName: "D-AI Daily Request Entitlement",
+      entitlementType: "metered",
+      meterSlug: config.requestMeterSlug,
+      period: "DAY",
+      measureUsageFrom: "CURRENT_PERIOD_START",
+      preserveOverageAtReset: false,
+      pending: () => 1,
+    },
+    {
+      key: "tokensPerDay",
+      label: "Tokens / day entitlement",
+      featureKey: config.tokensPerDayFeatureKey,
+      featureName: "D-AI Daily Token Entitlement",
+      entitlementType: "metered",
+      meterSlug: config.meterSlug,
+      period: "DAY",
+      measureUsageFrom: "CURRENT_PERIOD_START",
+      preserveOverageAtReset: false,
+      pending: (pendingTokens) => Number(pendingTokens || 0),
+    },
+  ];
 
   async function request(pathname, requestOptions = {}) {
     if (!config.enabled) {
@@ -307,7 +427,10 @@ export function createOpenMeterClient(options = {}) {
     const payload = await readJsonOrText(response);
 
     if (!response.ok) {
-      throw new Error(usageErrorMessage(payload, response));
+      const error = new Error(usageErrorMessage(payload, response));
+      error.status = response.status;
+      error.payload = payload;
+      throw error;
     }
 
     return payload;
@@ -319,6 +442,148 @@ export function createOpenMeterClient(options = {}) {
     }
 
     return tokenSubject(token);
+  }
+
+  function entitlementCustomerKey({token, account}) {
+    return subjectFor({token, account});
+  }
+
+  function entitlementCustomerName({token, account}) {
+    if (config.subjectMode === "account") {
+      return `D-AI Account ${account?.owner || token?.account?.owner || "unknown"}/${account?.name || token?.account?.name || "unknown"}`;
+    }
+
+    return `D-AI Token ${token?.name || token?.id || "unknown"}`;
+  }
+
+  function entitlementPayload(definition, limit, token) {
+    if (definition.entitlementType === "static") {
+      return {
+        type: "static",
+        featureKey: definition.featureKey,
+        metadata: {
+          "d_ai.limit_key": definition.key,
+          "d_ai.token_id": token?.id || "",
+        },
+        config: JSON.stringify({
+          limit: Number(limit || 0),
+          window: definition.period,
+        }),
+      };
+    }
+
+    return {
+      type: "metered",
+      featureKey: definition.featureKey,
+      metadata: {
+        "d_ai.limit_key": definition.key,
+        "d_ai.token_id": token?.id || "",
+      },
+      isSoftLimit: false,
+      usagePeriod: {
+        interval: definition.period,
+        anchor: "1970-01-01T00:00:00.000Z",
+      },
+      measureUsageFrom: definition.measureUsageFrom,
+      preserveOverageAtReset: definition.preserveOverageAtReset,
+      issue: {
+        amount: Number(limit || 0),
+        priority: 1,
+      },
+    };
+  }
+
+  async function ensureFeature(definition) {
+    if (!definition?.featureKey || ensuredFeatures.has(definition.featureKey)) {
+      return;
+    }
+
+    try {
+      await request(`/api/v1/features/${encodeURIComponent(definition.featureKey)}`);
+      ensuredFeatures.add(definition.featureKey);
+      return;
+    } catch (error) {
+      if (error.status !== 404) {
+        throw error;
+      }
+    }
+
+    try {
+      await request("/api/v1/features", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          key: definition.featureKey,
+          name: definition.featureName,
+          meterSlug: definition.meterSlug,
+        }),
+      });
+    } catch (error) {
+      if (error.status !== 409) {
+        throw error;
+      }
+    }
+
+    ensuredFeatures.add(definition.featureKey);
+  }
+
+  async function ensureEntitlementCustomer({token, account}) {
+    const subject = subjectFor({token, account});
+    const customerKey = entitlementCustomerKey({token, account});
+    const customerName = entitlementCustomerName({token, account});
+
+    try {
+      const existing = await request(`/api/v1/customers/${encodeURIComponent(customerKey)}`);
+      const subjectKeys = new Set(existing?.usageAttribution?.subjectKeys || []);
+      if (!subjectKeys.has(subject)) {
+        subjectKeys.add(subject);
+        await request(`/api/v1/customers/${encodeURIComponent(customerKey)}`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            name: existing?.name || customerName,
+            description: existing?.description || "D-AI OpenMeter entitlement customer",
+            metadata: existing?.metadata || {},
+            key: existing?.key || customerKey,
+            usageAttribution: {
+              subjectKeys: [...subjectKeys],
+            },
+          }),
+        });
+      }
+
+      return {customerKey, subject};
+    } catch (error) {
+      if (error.status !== 404) {
+        throw error;
+      }
+    }
+
+    await request("/api/v1/customers", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        key: customerKey,
+        name: customerName,
+        description: "D-AI OpenMeter entitlement customer",
+        metadata: {
+          "d_ai.account_owner": account?.owner || token?.account?.owner || "",
+          "d_ai.account_name": account?.name || token?.account?.name || "",
+          "d_ai.token_id": token?.id || "",
+        },
+        usageAttribution: {
+          subjectKeys: [subject],
+        },
+      }),
+    });
+
+    return {customerKey, subject};
   }
 
   async function queryMeterRows(meterSlug, {subject, from, to, windowSize, groupBy = []} = {}) {
@@ -492,71 +757,249 @@ export function createOpenMeterClient(options = {}) {
     });
   }
 
+  async function getEntitlementValue({customerKey, featureKey}) {
+    return request(`/api/v2/customers/${encodeURIComponent(customerKey)}/entitlements/${encodeURIComponent(featureKey)}/value`);
+  }
+
+  async function getEntitlement({customerKey, featureKey}) {
+    return request(`/api/v2/customers/${encodeURIComponent(customerKey)}/entitlements/${encodeURIComponent(featureKey)}`);
+  }
+
+  function entitlementMatchesConfig(entitlement, definition, limit) {
+    if (definition.entitlementType === "static") {
+      return entitlement?.type === "static" && sameNumber(entitlementConfigLimit(entitlement), limit);
+    }
+
+    return sameNumber(entitlement?.issue?.amount, limit)
+      && String(entitlement?.usagePeriod?.interval || "").toUpperCase() === String(definition.period).toUpperCase()
+      && String(entitlement?.measureUsageFrom || "") === String(definition.measureUsageFrom)
+      && Boolean(entitlement?.preserveOverageAtReset) === Boolean(definition.preserveOverageAtReset);
+  }
+
+  async function deleteEntitlement({customerKey, featureKey}) {
+    try {
+      await request(`/api/v2/customers/${encodeURIComponent(customerKey)}/entitlements/${encodeURIComponent(featureKey)}`, {
+        method: "DELETE",
+      });
+      return {featureKey, status: "deleted"};
+    } catch (error) {
+      if (error.status === 404) {
+        return {featureKey, status: "not_found"};
+      }
+
+      throw error;
+    }
+  }
+
+  async function upsertEntitlement({customerKey, definition, limit, token}) {
+    await ensureFeature(definition);
+
+    try {
+      const entitlement = await getEntitlement({customerKey, featureKey: definition.featureKey});
+      if (entitlementMatchesConfig(entitlement, definition, limit)) {
+        const value = await getEntitlementValue({customerKey, featureKey: definition.featureKey});
+        return {featureKey: definition.featureKey, status: "unchanged", value};
+      }
+
+      const overridden = await request(`/api/v2/customers/${encodeURIComponent(customerKey)}/entitlements/${encodeURIComponent(definition.featureKey)}/override`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(entitlementPayload(definition, limit, token)),
+      });
+      return {featureKey: definition.featureKey, status: "overridden", entitlement: overridden};
+    } catch (error) {
+      if (error.status !== 404) {
+        throw error;
+      }
+    }
+
+    try {
+      const entitlement = await request(`/api/v2/customers/${encodeURIComponent(customerKey)}/entitlements`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(entitlementPayload(definition, limit, token)),
+      });
+      return {featureKey: definition.featureKey, status: "created", entitlement};
+    } catch (error) {
+      if (error.status !== 409) {
+        throw error;
+      }
+
+      const entitlement = await request(`/api/v2/customers/${encodeURIComponent(customerKey)}/entitlements/${encodeURIComponent(definition.featureKey)}/override`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(entitlementPayload(definition, limit, token)),
+      });
+      return {featureKey: definition.featureKey, status: "overridden", entitlement};
+    }
+  }
+
+  async function deleteTokenEntitlements({token, account}) {
+    if (!config.enabled || !config.entitlementsEnabled || !token) {
+      return {
+        enabled: false,
+        source: "openmeter-customer-entitlement",
+      };
+    }
+
+    const customerKey = entitlementCustomerKey({token, account});
+    const subject = subjectFor({token, account});
+    const entries = await Promise.all(entitlementDefinitions.map((definition) => (
+      deleteEntitlement({customerKey, featureKey: definition.featureKey})
+    )));
+
+    return {
+      enabled: true,
+      source: "openmeter-customer-entitlement",
+      customerKey,
+      subject,
+      entries,
+    };
+  }
+
+  async function syncTokenEntitlements({token, account, limits: requestedLimits, removeUnlimited = false}) {
+    if (!config.enabled || !config.entitlementsEnabled || !token) {
+      return {
+        enabled: false,
+        source: "openmeter-customer-entitlement",
+      };
+    }
+
+    const limits = normalizeTokenLimits(requestedLimits);
+    const hasEntitlementLimits = entitlementDefinitions.some((definition) => Number(limits[definition.key] || 0) > 0);
+    if (!hasEntitlementLimits && !removeUnlimited) {
+      return {
+        enabled: true,
+        source: "openmeter-customer-entitlement",
+        entries: [],
+      };
+    }
+
+    if (!hasEntitlementLimits && removeUnlimited) {
+      return deleteTokenEntitlements({token, account});
+    }
+
+    const {customerKey, subject} = await ensureEntitlementCustomer({token, account});
+    const entries = [];
+
+    for (const definition of entitlementDefinitions) {
+      const limit = Number(limits[definition.key] || 0);
+      if (limit > 0) {
+        entries.push(await upsertEntitlement({customerKey, definition, limit, token}));
+      } else if (removeUnlimited) {
+        entries.push(await deleteEntitlement({customerKey, featureKey: definition.featureKey}));
+      }
+    }
+
+    return {
+      enabled: true,
+      source: "openmeter-customer-entitlement",
+      customerKey,
+      subject,
+      entries,
+    };
+  }
+
+  function entitlementUsageFrom(definition, at) {
+    if (definition.key === "totalTokens") {
+      return new Date(0);
+    }
+    if (definition.key === "requestsPerMinute") {
+      return oneMinuteAgo(at);
+    }
+    if (definition.key === "requestsPerHour") {
+      return oneHourAgo(at);
+    }
+
+    return startOfToday(at);
+  }
+
+  async function queryDefinitionUsage({definition, subject, at}) {
+    return sumRows(await queryMeterRows(definition.meterSlug, {
+      subject,
+      from: entitlementUsageFrom(definition, at),
+      to: new Date(at).toISOString(),
+    }));
+  }
+
+  async function getDefinitionEntitlementCheck({definition, customerKey, subject, at = now(), pending = 0}) {
+    try {
+      const value = await getEntitlementValue({
+        customerKey,
+        featureKey: definition.featureKey,
+      });
+      const hasEntitlementValue = value && [
+        "hasAccess",
+        "balance",
+        "usage",
+        "overage",
+        "totalAvailableGrantAmount",
+      ].some((key) => value[key] !== undefined);
+
+      if (!hasEntitlementValue) {
+        return null;
+      }
+      const used = definition.entitlementType === "static"
+        ? await queryDefinitionUsage({definition, subject, at})
+        : undefined;
+
+      return formatEntitlementLimitCheck({
+        definition,
+        value,
+        used,
+        pending,
+        fallbackLimit: 0,
+        customerKey,
+      });
+    } catch (error) {
+      if (error.status === 404) {
+        return null;
+      }
+
+      throw error;
+    }
+  }
+
+  async function getConfiguredEntitlementChecks({token, account, pendingTokens = 0, at = now()}) {
+    const customerKey = entitlementCustomerKey({token, account});
+    const subject = subjectFor({token, account});
+    const checks = await Promise.all(entitlementDefinitions.map((definition) => (
+      getDefinitionEntitlementCheck({
+        definition,
+        customerKey,
+        subject,
+        at,
+        pending: definition.pending(pendingTokens),
+      })
+    )));
+
+    return {
+      customerKey,
+      checks: checks.filter(Boolean),
+    };
+  }
+
   async function checkTokenLimits({token, accountState, pendingTokens = 0, at = now()}) {
     if (!config.enabled) {
       return {enabled: false};
     }
 
-    const limits = normalizeTokenLimits(token?.limits);
     const account = accountState?.account || token?.account || {};
     const subject = subjectFor({token, account});
     const checks = [];
-    const to = new Date(at).toISOString();
 
     try {
-      if (limits.totalTokens > 0) {
-        const used = await queryUsage({subject, from: new Date(0), to});
-        checks.push(formatLimitCheck({
-          key: "totalTokens",
-          label: "Total token quota",
-          used,
-          projected: used + Number(pendingTokens || 0),
-          limit: limits.totalTokens,
-        }));
-      }
-
-      if (limits.requestsPerMinute > 0) {
-        const used = await queryRequestCount({subject, from: oneMinuteAgo(at), to});
-        checks.push(formatLimitCheck({
-          key: "requestsPerMinute",
-          label: "Requests / minute",
-          used,
-          projected: used + 1,
-          limit: limits.requestsPerMinute,
-        }));
-      }
-
-      if (limits.requestsPerHour > 0) {
-        const used = await queryRequestCount({subject, from: oneHourAgo(at), to});
-        checks.push(formatLimitCheck({
-          key: "requestsPerHour",
-          label: "Requests / hour",
-          used,
-          projected: used + 1,
-          limit: limits.requestsPerHour,
-        }));
-      }
-
-      if (limits.requestsPerDay > 0) {
-        const used = await queryRequestCount({subject, from: startOfToday(at), to});
-        checks.push(formatLimitCheck({
-          key: "requestsPerDay",
-          label: "Requests / day",
-          used,
-          projected: used + 1,
-          limit: limits.requestsPerDay,
-        }));
-      }
-
-      if (limits.tokensPerDay > 0) {
-        const used = await queryUsage({subject, from: startOfToday(at), to});
-        checks.push(formatLimitCheck({
-          key: "tokensPerDay",
-          label: "Tokens / day",
-          used,
-          projected: used + Number(pendingTokens || 0),
-          limit: limits.tokensPerDay,
-        }));
+      let customerKey = "";
+      if (config.entitlementsEnabled) {
+        const entitlementStatus = await getConfiguredEntitlementChecks({token, account, pendingTokens, at});
+        checks.push(...entitlementStatus.checks);
+        customerKey = entitlementStatus.customerKey;
       }
 
       const blocked = checks.filter((check) => check.blocked);
@@ -567,6 +1010,7 @@ export function createOpenMeterClient(options = {}) {
         reasons: blocked.map((check) => `${check.label} limit reached (${check.used}/${check.limit})`),
         checks,
         subject,
+        customerKey,
         meterSlug: config.meterSlug,
       };
     } catch (error) {
@@ -595,60 +1039,42 @@ export function createOpenMeterClient(options = {}) {
   }
 
   async function getLimitSnapshot({token, account, at = now()}) {
-    const limits = normalizeTokenLimits(token?.limits);
     const subject = subjectFor({token, account});
-    const to = new Date(at).toISOString();
-    const [totalTokens, minuteRequests, hourRequests, dayRequests, dayTokens] = await Promise.all([
-      queryUsage({subject, from: new Date(0), to}),
-      queryRequestCount({subject, from: oneMinuteAgo(at), to}),
-      queryRequestCount({subject, from: oneHourAgo(at), to}),
-      queryRequestCount({subject, from: startOfToday(at), to}),
-      queryUsage({subject, from: startOfToday(at), to}),
-    ]);
-    const checks = [
-      formatLimitCheck({
-        key: "totalTokens",
-        label: "Total token quota",
-        used: totalTokens,
-        projected: totalTokens,
-        limit: limits.totalTokens,
-      }),
-      formatLimitCheck({
-        key: "requestsPerMinute",
-        label: "Requests / minute",
-        used: minuteRequests,
-        projected: minuteRequests,
-        limit: limits.requestsPerMinute,
-      }),
-      formatLimitCheck({
-        key: "requestsPerHour",
-        label: "Requests / hour",
-        used: hourRequests,
-        projected: hourRequests,
-        limit: limits.requestsPerHour,
-      }),
-      formatLimitCheck({
-        key: "requestsPerDay",
-        label: "Requests / day",
-        used: dayRequests,
-        projected: dayRequests,
-        limit: limits.requestsPerDay,
-      }),
-      formatLimitCheck({
-        key: "tokensPerDay",
-        label: "Tokens / day",
-        used: dayTokens,
-        projected: dayTokens,
-        limit: limits.tokensPerDay,
-      }),
-    ];
+    const customerKey = entitlementCustomerKey({token, account});
+    let entitlementChecksByKey = {};
+
+    if (config.entitlementsEnabled) {
+      const entitlementChecks = await Promise.all(entitlementDefinitions.map(async (definition) => [
+        definition.key,
+        await getDefinitionEntitlementCheck({definition, customerKey, subject, at}),
+      ]));
+      entitlementChecksByKey = Object.fromEntries(entitlementChecks.filter(([, check]) => Boolean(check)));
+    }
+
+    const checks = await Promise.all(entitlementDefinitions.map(async (definition) => {
+      if (entitlementChecksByKey[definition.key]) {
+        return entitlementChecksByKey[definition.key];
+      }
+
+      const used = await queryDefinitionUsage({definition, subject, at});
+      return formatLimitCheck({
+        key: definition.key,
+        label: definition.label,
+        used,
+        projected: used,
+        limit: 0,
+        source: config.entitlementsEnabled ? "openmeter-customer-entitlement" : "openmeter",
+      });
+    }));
+    const limits = Object.fromEntries(checks.map((check) => [check.key, check.limit]));
 
     return {
       allowed: checks.every((check) => !check.blocked),
       reasons: checks.filter((check) => check.blocked).map((check) => `${check.label} limit reached (${check.used}/${check.limit})`),
       checks,
       limits,
-      source: "openmeter",
+      source: config.entitlementsEnabled ? "openmeter-customer-entitlement" : "openmeter",
+      customerKey,
     };
   }
 
@@ -822,6 +1248,8 @@ export function createOpenMeterClient(options = {}) {
     recordUsage,
     recordRequestFailure,
     checkTokenLimits,
+    syncTokenEntitlements,
+    deleteTokenEntitlements,
     getTokenMetrics,
   };
 }

@@ -48,7 +48,7 @@ http://localhost:5174/
 
 Vite may use `5173` if that port is available.
 
-OpenMeter is required for D-AI token usage metering and quota checks. D-AI request audit logs are shipped by OpenTelemetry Collector into ClickHouse. See [OpenMeter Integration](docs/openmeter-integration.md) and [Logging Storage Options](docs/logging-storage-options.md).
+OpenMeter is required for D-AI token usage metering and customer-entitlement quota checks. D-AI request audit logs are shipped by OpenTelemetry Collector into ClickHouse. See [OpenMeter Integration](docs/openmeter-integration.md) and [Logging Storage Options](docs/logging-storage-options.md).
 
 ## Seeded Local Data
 
@@ -138,9 +138,9 @@ D-AI also adds local Vite middleware routes:
 ```text
 /api/d-ai/casdoor-token       Exchanges a Casdoor OAuth code for a profile access token
 /api/d-ai/upload-file         Uploads chat attachments into the configured Casibase store
-/api/d-ai/token-state         Reads or bootstraps the signed-in user's D-AI token metadata
-/api/d-ai/token-action        Mutates token metadata and emits usage/request events
-/api/d-ai/token-limit-check   Checks OpenMeter-backed token limits before browser chat sends to Casibase
+/api/d-ai/token-state         Reads the signed-in user's D-AI token metadata
+/api/d-ai/token-action        Mutates token metadata and syncs OpenMeter customer entitlements
+/api/d-ai/token-limit-check   Checks OpenMeter customer-entitlement token limits before browser chat sends to Casibase
 /api/d-ai/token-metrics       Returns OpenMeter-backed token dashboard metrics
 /api/d-ai/token-request-logs  Returns ClickHouse-backed token request audit logs
 /api/v1/models                Lists the D-AI OpenAI-compatible model ID
@@ -177,7 +177,14 @@ OPENMETER_COST_METER_SLUG=cost_total
 OPENMETER_EVENT_TYPE=prompt
 OPENMETER_EVENT_SOURCE=d-ai
 OPENMETER_SUBJECT_MODE=token
-OPENMETER_FAIL_CLOSED=false
+OPENMETER_ENTITLEMENTS_ENABLED=true
+OPENMETER_TOTAL_TOKENS_FEATURE_KEY=d_ai_token_quota
+OPENMETER_REQUESTS_PER_MINUTE_FEATURE_KEY=d_ai_minute_requests
+OPENMETER_REQUESTS_PER_HOUR_FEATURE_KEY=d_ai_hourly_requests
+OPENMETER_TOKENS_PER_DAY_FEATURE_KEY=d_ai_daily_tokens
+OPENMETER_REQUESTS_PER_DAY_FEATURE_KEY=d_ai_daily_requests
+OPENMETER_TOTAL_TOKENS_ENTITLEMENT_PERIOD=P100Y
+OPENMETER_FAIL_CLOSED=true
 D_AI_AUDIT_LOG_ENABLED=true
 D_AI_AUDIT_LOG_FILE=.d-ai-state/logs/request-audit.jsonl
 D_AI_CLICKHOUSE_LOGS_ENABLED=true
@@ -190,7 +197,7 @@ D_AI_CLICKHOUSE_LOGS_TABLE=otel_logs
 
 `VITE_CASDOOR_CLIENT_SECRET` is used by the local Vite middleware for development profile updates. Do not expose this dev middleware directly to untrusted clients.
 `D_AI_UPLOAD_ADMIN_*` is used only by the local Vite middleware to call Casibase file upload APIs that require admin privilege. Replace it with a service account or a tighter backend permission model before production.
-For D-AI backend + OpenMeter usage metering and quota checks, see [OpenMeter Integration](docs/openmeter-integration.md). For OpenTelemetry + ClickHouse audit logging, see [Logging Storage Options](docs/logging-storage-options.md).
+For D-AI backend + OpenMeter usage metering and quota checks, see [OpenMeter Integration](docs/openmeter-integration.md). For the difference between Casdoor pricing and OpenMeter entitlements, see [Casdoor Pricing vs OpenMeter Entitlements](docs/casdoor-vs-openmeter-entitlements.md). For OpenTelemetry + ClickHouse audit logging, see [Logging Storage Options](docs/logging-storage-options.md).
 
 ## Useful Commands
 
@@ -219,7 +226,7 @@ Casibase can still generate its own chat titles, such as `New Chat - 1`, after a
 
 Chat attachments are intentionally limited to images in D-AI. Casibase's document/vector indexer does not support image extensions such as `.jpeg`, so D-AI stores the image and sends image metadata/URL context to the chat instead of treating the upload as a text document. Image understanding still depends on the selected Casibase model provider: use a vision-capable model, and make sure the image URL is reachable by that model runtime.
 
-D-AI token metadata is handled by the local middleware in development. Usage metrics, request metrics, and quota counters come from OpenMeter. Detailed request audit logs are written outside token state and shipped to ClickHouse by OpenTelemetry Collector. For ownership boundaries, local persistence, security, and production guidance, see [Application Responsibilities](docs/application-responsibilities.md).
+D-AI token metadata is handled by the local middleware in development. Usage metrics, request metrics, and quota entitlement values come from OpenMeter. Detailed request audit logs are written outside token state and shipped to ClickHouse by OpenTelemetry Collector. For ownership boundaries, local persistence, security, and production guidance, see [Application Responsibilities](docs/application-responsibilities.md).
 
 For `/api/v1/chat/completions`, reuse the same `X-D-AI-History-Key` header to append requests to the same Casibase chat history. If the header is omitted, D-AI uses `default`, so each token has one stable default API conversation. Use a different history key only when you want a separate API conversation.
 
@@ -359,13 +366,15 @@ Operational notes:
 
 ## Token Limits
 
-Token quotas are optional when creating a token. Leave the quota blank, or set any limit to `0`, when you do not want that cap:
+Token quotas are optional when creating a token. Leave the entitlement field blank, or set any limit to `0`, when you do not want that cap:
 
-- Requests per minute.
-- Requests per hour.
-- Requests per day.
-- Tokens per day.
-- Total token quota.
+- Requests per minute, synced to an OpenMeter customer entitlement.
+- Requests per hour, synced to an OpenMeter customer entitlement.
+- Requests per day, synced to an OpenMeter customer entitlement.
+- Tokens per day, synced to an OpenMeter customer entitlement.
+- Token entitlement quota, synced to an OpenMeter customer entitlement.
+
+D-AI uses OpenMeter customer entitlement APIs, not the deprecated subject entitlement APIs. With the default token subject mode, each D-AI token maps to one OpenMeter customer key such as `dai_token_tok_...`.
 
 ## Chat Completions API
 
@@ -402,7 +411,7 @@ curl 'http://localhost:5174/api/v1/history?key=openclaw%3Acasibase%3Adebug-login
   -H 'Authorization: Bearer <D_AI_TOKEN>'
 ```
 
-Tokens are synced from the browser into the local Vite API layer after sign-in. If a new token is rejected by curl, refresh D-AI once while signed in and try again. The local state file stores token metadata only. OpenMeter is the source for usage and quota metrics, and ClickHouse is the local audit log store. See [Application Responsibilities](docs/application-responsibilities.md).
+Tokens are loaded from the D-AI backend after sign-in. If a new token is rejected by curl, refresh D-AI once while signed in and try again. The local state file stores token identity and status only. OpenMeter is the source for usage metrics, request metrics, quota limit values, and customer-entitlement quota decisions, and ClickHouse is the local audit log store. See [Application Responsibilities](docs/application-responsibilities.md).
 
 ## Production Note
 

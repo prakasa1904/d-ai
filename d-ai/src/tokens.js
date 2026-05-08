@@ -1,14 +1,8 @@
-const storagePrefix = "d-ai.token-state";
-
 export function emptyTokenState() {
   return {
     version: 1,
     tokens: [],
   };
-}
-
-function storageKey(account) {
-  return `${storagePrefix}.${account.owner}.${account.name}`;
 }
 
 export function defaultTokenLimits() {
@@ -30,13 +24,6 @@ export function normalizeTokenLimits(limits = {}) {
   }));
 }
 
-function normalizeToken(token) {
-  return {
-    ...token,
-    limits: normalizeTokenLimits(token?.limits),
-  };
-}
-
 function randomText(byteLength = 24) {
   const bytes = new Uint8Array(byteLength);
   globalThis.crypto.getRandomValues(bytes);
@@ -44,49 +31,6 @@ function randomText(byteLength = 24) {
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/g, "");
-}
-
-export function loadTokenState(account) {
-  if (!account) {
-    return emptyTokenState();
-  }
-
-  try {
-    const parsed = JSON.parse(localStorage.getItem(storageKey(account)) || "");
-    return {
-      ...emptyTokenState(),
-      ...parsed,
-      tokens: Array.isArray(parsed?.tokens) ? parsed.tokens.map(normalizeToken) : [],
-    };
-  } catch {
-    return emptyTokenState();
-  }
-}
-
-export function saveTokenState(account, state) {
-  if (!account) {
-    return;
-  }
-
-  localStorage.setItem(storageKey(account), JSON.stringify({
-    version: 1,
-    tokens: Array.isArray(state?.tokens) ? state.tokens.map(normalizeToken) : [],
-  }));
-}
-
-export function createTokenRecord(name, limits = {}) {
-  const createdAt = new Date().toISOString();
-  const suffix = randomText(5).toLowerCase();
-
-  return {
-    id: `tok_${Date.now()}_${suffix}`,
-    name: name.trim() || `D-AI Token ${suffix.slice(0, 4)}`,
-    value: `dai_${randomText(32)}`,
-    status: "Active",
-    createdAt,
-    lastUsedAt: "",
-    limits: normalizeTokenLimits(limits),
-  };
 }
 
 export function isTokenActive(token) {
@@ -232,12 +176,12 @@ export function getTokenLimitStatus(token, usage, pendingTokens = 0, now = new D
     };
   }
 
-  const limits = normalizeTokenLimits(token.limits);
+  const limits = defaultTokenLimits();
   const stats = getTokenWindowStats(usage, token.id, now);
   const checks = [
     {
       key: "totalTokens",
-      label: "Total token quota",
+      label: "Token entitlement quota",
       used: stats.all.totalTokens,
       projected: stats.all.totalTokens + Number(pendingTokens || 0),
       limit: limits.totalTokens,

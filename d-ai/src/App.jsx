@@ -17,7 +17,6 @@ import {
   registerWithPassword,
   sendChatMessage,
   signOut,
-  syncTokenState,
   updateChat,
   updateMessage,
   uploadStoreFile,
@@ -32,10 +31,8 @@ import {
   estimateTokenCount,
   getTokenLimitStatus,
   isTokenActive,
-  loadTokenState,
   maskToken,
   normalizeTokenLimits,
-  saveTokenState,
 } from "./tokens";
 
 function displayName(account) {
@@ -991,7 +988,7 @@ function DailyActivity({days, title}) {
   );
 }
 
-function TokenUsageTimeseries({periodLabelText, series, tokens, selectedTokenId, onSelectedTokenId}) {
+function TokenUsageTimeseries({periodLabelText, series, tokens, selectedTokenId, onSelectedTokenId, showTokenSelector = true}) {
   const totals = series.reduce((result, day) => ({
     requests: result.requests + day.requests,
     totalTokens: result.totalTokens + day.totalTokens,
@@ -1008,12 +1005,14 @@ function TokenUsageTimeseries({periodLabelText, series, tokens, selectedTokenId,
             {periodLabelText} · {totals.requests} requests · {totals.totalTokens} tokens · {totals.promptTokens} prompt · {totals.responseTokens} response
           </p>
         </div>
-        <select value={selectedTokenId} onChange={(event) => onSelectedTokenId(event.target.value)}>
-          <option value="all">All tokens</option>
-          {tokens.map((token) => (
-            <option key={token.id} value={token.id}>{token.name}</option>
-          ))}
-        </select>
+        {showTokenSelector ? (
+          <select value={selectedTokenId} onChange={(event) => onSelectedTokenId(event.target.value)}>
+            <option value="all">All tokens</option>
+            {tokens.map((token) => (
+              <option key={token.id} value={token.id}>{token.name}</option>
+            ))}
+          </select>
+        ) : null}
       </div>
 
       {totals.requests === 0 ? (
@@ -1183,6 +1182,22 @@ function limitText(value) {
   return value > 0 ? value.toLocaleString() : "Unlimited";
 }
 
+function limitCheckFor(tokenMetrics, tokenId, key = "totalTokens") {
+  return tokenMetrics?.limitByToken?.[tokenId]?.checks?.find((check) => check.key === key) || null;
+}
+
+function limitsFromChecks(status) {
+  const limits = normalizeTokenLimits({});
+
+  (status?.checks || []).forEach((check) => {
+    if (Object.hasOwn(limits, check.key)) {
+      limits[check.key] = Math.max(0, Math.floor(Number(check.limit || 0)));
+    }
+  });
+
+  return limits;
+}
+
 function LimitMeter({label, used, limit, missing}) {
   const percent = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
   const isExceeded = missing || (limit > 0 && used >= limit);
@@ -1200,23 +1215,26 @@ function LimitMeter({label, used, limit, missing}) {
   );
 }
 
-function RateLimitTracker({tokenData, tokenMetrics, selectedTokenId, onSelectedTokenId, onUpdateTokenLimits}) {
+function RateLimitTracker({tokenData, tokenMetrics, selectedTokenId, onSelectedTokenId, onUpdateTokenLimits, showTokenSelector = true}) {
   const token = tokenData.tokens.find((item) => item.id === selectedTokenId) || tokenData.tokens[0];
   const status = useMemo(() => {
     const meteredStatus = token ? tokenMetrics?.limitByToken?.[token.id] : null;
     return meteredStatus?.checks ? meteredStatus : getTokenLimitStatus(token, []);
   }, [token, tokenMetrics]);
-  const limits = token?.limits || {};
-  const [draftLimits, setDraftLimits] = useState(normalizeTokenLimits(limits));
+  const statusKey = useMemo(
+    () => (status?.checks || []).map((check) => `${check.key}:${check.limit}:${check.used}:${check.source || ""}`).join("|"),
+    [status],
+  );
+  const [draftLimits, setDraftLimits] = useState(() => limitsFromChecks(status));
   const [saveError, setSaveError] = useState("");
   const [saveNotice, setSaveNotice] = useState("");
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
-    setDraftLimits(normalizeTokenLimits(token?.limits));
+    setDraftLimits(limitsFromChecks(status));
     setSaveError("");
     setSaveNotice("");
-  }, [token?.id, token?.limits]);
+  }, [token?.id, statusKey]);
 
   function updateLimit(field, value) {
     if (!token) {
@@ -1241,7 +1259,7 @@ function RateLimitTracker({tokenData, tokenMetrics, selectedTokenId, onSelectedT
 
     try {
       await onUpdateTokenLimits(token.id, draftLimits);
-      setSaveNotice("Limits saved");
+      setSaveNotice("Limits saved to OpenMeter entitlements");
     } catch (error) {
       setSaveError(error.message);
     } finally {
@@ -1254,13 +1272,15 @@ function RateLimitTracker({tokenData, tokenMetrics, selectedTokenId, onSelectedT
       <div className="section-heading token-chart-heading">
         <div>
           <h2>Rate Limit Tracker</h2>
-          <p className="side-note">Leave any limit at 0 for unlimited. Set a total quota only when the token needs a lifetime cap.</p>
+          <p className="side-note">Leave any limit at 0 for unlimited. Token, daily token, and daily request quotas are synced to OpenMeter customer entitlements.</p>
         </div>
-        <select value={token?.id || ""} onChange={(event) => onSelectedTokenId(event.target.value)}>
-          {tokenData.tokens.map((item) => (
-            <option key={item.id} value={item.id}>{item.name}</option>
-          ))}
-        </select>
+        {showTokenSelector ? (
+          <select value={token?.id || ""} onChange={(event) => onSelectedTokenId(event.target.value)}>
+            {tokenData.tokens.map((item) => (
+              <option key={item.id} value={item.id}>{item.name}</option>
+            ))}
+          </select>
+        ) : null}
       </div>
 
       {!token ? (
@@ -1283,7 +1303,7 @@ function RateLimitTracker({tokenData, tokenMetrics, selectedTokenId, onSelectedT
 
           <div className="limit-editor">
             <label>
-              Total token quota
+              Token entitlement quota
               <input
                 min="0"
                 placeholder="Unlimited"
@@ -1943,7 +1963,7 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
   const [isLoadingRequestLogs, setIsLoadingRequestLogs] = useState(false);
   const [isMutatingToken, setIsMutatingToken] = useState(false);
   const metricsTokenKey = useMemo(
-    () => tokenData.tokens.map((token) => `${token.id}:${token.status || ""}:${token.lastUsedAt || ""}:${JSON.stringify(token.limits || {})}`).join("|"),
+    () => tokenData.tokens.map((token) => `${token.id}:${token.status || ""}:${token.lastUsedAt || ""}`).join("|"),
     [tokenData.tokens],
   );
   const tokenMetrics = useMemo(
@@ -1988,7 +2008,7 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
     const totalTokens = trimmedLimit ? Math.floor(Number(trimmedLimit)) : 0;
 
     if (!Number.isFinite(totalTokens) || totalTokens < 0) {
-      setFormError("Token quota must be 0 or greater.");
+      setFormError("Token entitlement quota must be 0 or greater.");
       setNotice("");
       return;
     }
@@ -2132,13 +2152,13 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
                 placeholder="Token name"
               />
               <input
-                aria-label="Total token quota"
+                aria-label="Token entitlement quota"
                 inputMode="numeric"
                 min="0"
                 type="number"
                 value={tokenLimit}
                 onChange={(event) => setTokenLimit(event.target.value)}
-                placeholder="Quota optional"
+                placeholder="Entitlement optional"
               />
               <button className="primary-button" disabled={isMutatingToken}>
                 {isMutatingToken ? "Saving..." : "Create token"}
@@ -2194,6 +2214,9 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
                 const usage = summaries.byToken[token.id] || {};
                 const requestStats = requestByToken[token.id] || {};
                 const logStats = tokenRequestLogs.byToken[token.id] || {};
+                const quotaCheck = limitCheckFor(tokenMetrics, token.id);
+                const quotaUsed = quotaCheck ? quotaCheck.used : usage.totalTokens || 0;
+                const quotaLimit = quotaCheck ? quotaCheck.limit : 0;
 
                 return (
                   <article className="token-row" key={token.id}>
@@ -2205,7 +2228,7 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
                     <div className="token-usage">
                       <span>{requestStats.requests || 0} attempts · {formatPercent(requestStats.successRate)}</span>
                       <span>{requestStats.failed || 0} failed · {logStats.lastFailureReason || "No failures"}</span>
-                      <span>{usage.totalTokens || 0} / {limitText(token.limits?.totalTokens || 0)} quota</span>
+                      <span>{quotaUsed || 0} / {limitText(quotaLimit || 0)} entitlement</span>
                       <span>{logStats.lastSeenAt ? formatChatTime(logStats.lastSeenAt) : `No logs in ${selectedPeriodLabel}`}</span>
                     </div>
                     <div className="token-actions">
@@ -2262,9 +2285,10 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
   const [isLoadingMetrics, setIsLoadingMetrics] = useState(false);
   const [isLoadingRequestLogs, setIsLoadingRequestLogs] = useState(false);
   const [isMutatingToken, setIsMutatingToken] = useState(false);
+  const [metricsRefreshKey, setMetricsRefreshKey] = useState(0);
   const token = tokenData.tokens.find((item) => item.id === tokenId);
   const metricsTokenKey = useMemo(
-    () => token ? `${token.id}:${token.status || ""}:${token.lastUsedAt || ""}:${JSON.stringify(token.limits || {})}` : "",
+    () => token ? `${token.id}:${token.status || ""}:${token.lastUsedAt || ""}` : "",
     [token],
   );
   const tokenMetrics = useMemo(
@@ -2284,6 +2308,9 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
   const usageSeries = tokenMetrics.usageSeries;
   const failures = tokenMetrics.failureBreakdown;
   const selectedPeriodLabel = periodLabel(periodDays);
+  const quotaCheck = token ? limitCheckFor(tokenMetrics, token.id) : null;
+  const quotaUsed = quotaCheck ? quotaCheck.used : usage.totalTokens || 0;
+  const quotaLimit = quotaCheck ? quotaCheck.limit : 0;
 
   async function logout() {
     await signOut();
@@ -2344,13 +2371,9 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
     }
   }
 
-  function selectToken(nextTokenId) {
-    if (nextTokenId === "all") {
-      onNavigate("/tokens");
-      return;
-    }
-
-    onNavigate(`/tokens/${nextTokenId}`);
+  async function updateTokenLimits(tokenIdToUpdate, limits) {
+    await onUpdateTokenLimits(tokenIdToUpdate, limits);
+    setMetricsRefreshKey((current) => current + 1);
   }
 
   useEffect(() => {
@@ -2384,7 +2407,7 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
     return () => {
       active = false;
     };
-  }, [periodDays, token?.id, tokenId, metricsTokenKey]);
+  }, [periodDays, token?.id, tokenId, metricsTokenKey, metricsRefreshKey]);
 
   useEffect(() => {
     if (!token) {
@@ -2461,7 +2484,7 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
             <button className="ghost-button" disabled={isMutatingToken} onClick={toggleToken}>
               {isTokenActive(token) ? "Deactivate" : "Activate"}
             </button>
-            <button className="small-button danger" disabled={isMutatingToken} onClick={deleteToken}>Delete</button>
+            <button className="ghost-button danger" disabled={isMutatingToken} onClick={deleteToken}>Delete</button>
           </div>
         </div>
 
@@ -2489,8 +2512,8 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
               <strong>{formatFullTime(logUsage.lastSeenAt || token.lastUsedAt)}</strong>
             </div>
             <div>
-              <span>Total quota</span>
-              <strong>{limitText(token.limits?.totalTokens || 0)}</strong>
+              <span>Entitlement quota</span>
+              <strong>{limitText(quotaLimit || 0)}</strong>
             </div>
           </div>
         </section>
@@ -2500,7 +2523,7 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
           <StatCard label="Success rate" value={formatPercent(requestSummary.successRate)} detail={`${requestSummary.success} succeeded`} />
           <StatCard label="Failed" value={requestSummary.failed} detail={`${selectedPeriodLabel} failed requests`} />
           <StatCard label="Token usage" value={usage.totalTokens || 0} detail={`${usage.promptTokens || 0} prompt, ${usage.responseTokens || 0} response`} />
-          <StatCard label="Quota" value={`${usage.totalTokens || 0} / ${limitText(token.limits?.totalTokens || 0)}`} detail="Lifetime token quota" />
+          <StatCard label="Entitlement" value={`${quotaUsed || 0} / ${limitText(quotaLimit || 0)}`} detail="OpenMeter customer entitlement" />
           <StatCard label="Cost" value={(usage.price || 0).toFixed(4)} detail={`${selectedPeriodLabel}, reported by Casibase`} />
         </section>
 
@@ -2515,9 +2538,9 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
           <TokenUsageTimeseries
             periodLabelText={selectedPeriodLabel}
             selectedTokenId={token.id}
+            showTokenSelector={false}
             series={usageSeries}
             tokens={tokenData.tokens}
-            onSelectedTokenId={selectToken}
           />
 
           <UsageBreakdown title="Failure Breakdown" entries={failures} />
@@ -2526,9 +2549,9 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
         <RateLimitTracker
           tokenMetrics={tokenMetrics}
           selectedTokenId={token.id}
+          showTokenSelector={false}
           tokenData={tokenData}
-          onSelectedTokenId={selectToken}
-          onUpdateTokenLimits={onUpdateTokenLimits}
+          onUpdateTokenLimits={updateTokenLimits}
         />
 
         <ApiReference token={token} onCopy={copyText} />
@@ -3466,24 +3489,8 @@ export default function App() {
       tokens: Array.isArray(next?.tokens) ? next.tokens : [],
     };
 
-    saveTokenState(account, state);
     setTokenData(state);
     return state;
-  }
-
-  function persistTokenData(next) {
-    saveTokenState(account, next);
-
-    if (!account) {
-      return;
-    }
-
-    syncTokenState(account, next)
-      .then((synced) => {
-        saveTokenState(account, synced);
-        setTokenData(synced);
-      })
-      .catch(() => null);
   }
 
   function applyTokenMutation(result) {
@@ -3514,10 +3521,7 @@ export default function App() {
   function recordManagedTokenUsage(entry) {
     mutateTokenState("record-usage", {entry})
       .then(applyTokenMutation)
-      .catch(() => persistTokenData({
-        ...tokenData,
-        tokens: tokenData.tokens.map((token) => token.id === entry.tokenId ? {...token, lastUsedAt: entry.createdAt} : token),
-      }));
+      .catch(() => null);
   }
 
   function recordManagedTokenRequest(event) {
@@ -3559,15 +3563,9 @@ export default function App() {
       return;
     }
 
-    const next = loadTokenState(account);
-    setTokenData(next);
-    syncTokenState(account, next)
-      .then((synced) => {
-        applyTokenState(synced);
-      })
-      .catch(() => getServerTokenState()
-        .then(applyTokenState)
-        .catch(() => null));
+    getServerTokenState()
+      .then(applyTokenState)
+      .catch(() => setTokenData(emptyTokenState()));
   }, [account]);
 
   if (isChecking) {

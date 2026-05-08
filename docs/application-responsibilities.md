@@ -34,6 +34,8 @@ Casdoor OAuth tokens are still important, but they are not a good replacement fo
 
 That is why D-AI does not use Casdoor tokens as public API tokens for `/api/v1/chat/completions`. Casdoor remains the identity provider, while D-AI owns the product API token layer.
 
+Casdoor pricing and subscription data can be used to decide which commercial plan a user or organization owns. It should not be the live LLM token quota engine. For the recommended split between Casdoor pricing and OpenMeter entitlements, see [Casdoor Pricing vs OpenMeter Entitlements](casdoor-vs-openmeter-entitlements.md).
+
 ## Casibase
 
 Casibase is the AI workspace and model execution system.
@@ -59,12 +61,12 @@ D-AI owns:
 - The custom OpenAI-compatible API under `/api/v1/*`.
 - D-AI `dai_...` bearer tokens.
 - Token active/inactive status.
-- Token quota and rate limit configuration.
+- OpenMeter customer mapping for quota-style entitlements.
 - The deterministic routing rule from one D-AI token plus one history key to one stable Casibase chat.
 - Delivery of usage and request events into OpenMeter.
 - Delivery of structured request audit logs into the OpenTelemetry pipeline.
 
-In this local stack, D-AI owns token lifecycle and metadata, OpenMeter is the source for token dashboard metrics, request metrics, and quota checks, and ClickHouse is the detailed audit log store. See [OpenMeter Integration](openmeter-integration.md) and [Logging Storage Options](logging-storage-options.md).
+In this local stack, D-AI owns token lifecycle and metadata, OpenMeter is the source for token dashboard metrics, request metrics, customer entitlement values, and quota checks, and ClickHouse is the detailed audit log store. See [OpenMeter Integration](openmeter-integration.md) and [Logging Storage Options](logging-storage-options.md).
 
 In local development, D-AI stores this state in:
 
@@ -76,17 +78,16 @@ That file contains sensitive local development data:
 
 - Real `dai_...` bearer token values.
 - Casibase session cookies.
-- Token quota configuration.
 
 It must stay local and git-ignored.
 
 ## Local State File
 
-`d-ai/.d-ai-state/tokens.json` is a development-only persistence file used by the Vite middleware.
+`d-ai/.d-ai-state/tokens.json` is a local persistence file used by the Vite middleware while simulating the production D-AI backend.
 
-It exists because the current D-AI API layer is local middleware, not a production backend service yet. The file lets D-AI remember created tokens, token status, token limits, and session-cookie bindings after the browser refreshes or the Vite dev server restarts.
+It exists because the current D-AI API layer is local middleware, not a deployed backend service yet. The file lets D-AI remember created tokens, token status, and session-cookie bindings after the browser refreshes or the Vite dev server restarts.
 
-This file is not the source of truth for token dashboard metrics, quota counters, or request audit logs. OpenMeter is the source for usage totals, request totals, failure analytics, and rate/quota counters. ClickHouse is the request audit log store.
+This file is not the source of truth for token dashboard metrics, quota counters, quota limit values, entitlement values, or request audit logs. OpenMeter is the source for usage totals, request totals, failure analytics, quota limit values, and customer entitlement values. ClickHouse is the request audit log store.
 
 It is not a Casdoor table and not a Casibase table.
 
@@ -96,7 +97,7 @@ For production, move the D-AI middleware state into a real backend database. Rec
 
 ```text
 d_ai_tokens
-d_ai_token_limits
+d_ai_openmeter_customers
 d_ai_metering_outbox
 ```
 
@@ -104,9 +105,11 @@ Recommended production ownership:
 
 - Casdoor continues to authenticate users.
 - Casibase continues to manage AI stores, chats, messages, files, and providers.
-- D-AI backend owns product API tokens, token metadata, token limit configuration, deterministic API history routing, and a metering outbox for retrying OpenMeter delivery.
-- OpenMeter owns durable metered usage, request metrics, entitlement checks, and quota/billing reporting.
+- D-AI backend owns product API tokens, token metadata, deterministic API history routing, OpenMeter customer/subject mapping, and a metering outbox for retrying OpenMeter delivery. It should store mappings to OpenMeter entitlements, not duplicate entitlement limit values.
+- OpenMeter owns durable metered usage, request metrics, customer entitlement checks, quota values, and billing reporting.
 - OpenTelemetry Collector ships request audit logs into ClickHouse or another dedicated logging backend.
+
+If subscription plans are needed, use Casdoor for the user, organization, application access, and paid-plan relationship. Use OpenMeter for the metered entitlement, quota balance, and usage decision. D-AI remains the enforcement point before Casibase is called.
 
 Do not store durable usage metrics or quota counters in the D-AI token table. If you need detailed request auditing beyond OpenMeter metrics, store it separately from token metadata. For the recommended logging storage split, see [Logging Storage Options](logging-storage-options.md).
 
@@ -129,7 +132,7 @@ OpenAI-compatible API flow:
 ```text
 Client sends Authorization: Bearer dai_...
 D-AI validates the token from its token store
-D-AI checks token status and quota, using OpenMeter for token and request counters
+D-AI checks token status and quota, using OpenMeter customer entitlements and request counters
 D-AI reads X-D-AI-History-Key or uses default
 D-AI computes a stable Casibase chat name from token + history key
 D-AI sends the prompt to Casibase

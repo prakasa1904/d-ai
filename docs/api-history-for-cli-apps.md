@@ -8,7 +8,8 @@ For API clients, authentication and chat history are separate concerns:
 
 ```text
 Token = authentication and ownership boundary
-OpenMeter subject = quota, usage, and request metrics owner
+OpenMeter customer entitlement = quota owner
+OpenMeter subject = usage and request metrics attribution key
 History key = conversation, task, or session context
 ```
 

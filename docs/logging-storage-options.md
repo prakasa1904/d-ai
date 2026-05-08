@@ -8,11 +8,11 @@ D-AI should stay focused on token management:
 
 - Create, update, activate, deactivate, and delete D-AI API tokens.
 - Store token metadata and hashed token secrets.
-- Store token limit configuration.
+- Store OpenMeter customer mapping.
 - Deterministically route token plus history key to a Casibase chat history.
 - Emit metering events to OpenMeter.
 
-OpenMeter should remain the source for quota counters, usage totals, request totals, success rate, failed request counts, and billing or entitlement reporting.
+OpenMeter should remain the source for customer entitlement values, quota decisions, usage totals, request totals, success rate, failed request counts, and billing or entitlement reporting.
 
 Detailed request logs are a separate concern. They should not live in `d-ai/.d-ai-state/tokens.json`, and they should not be stored inside the token metadata table.
 
@@ -91,10 +91,10 @@ Do not start with SigNoz or Uptrace for this local D-AI layer. They are good ope
 
 | Need | Best store |
 | --- | --- |
-| Token quota checks | OpenMeter |
+| Token quota checks | OpenMeter customer entitlements |
 | Token usage dashboard | OpenMeter |
 | Billing or entitlement reporting | OpenMeter |
-| Token metadata and limits | D-AI database |
+| Token metadata and OpenMeter mapping | D-AI database |
 | OpenMeter retry buffer | D-AI `d_ai_metering_outbox` table |
 | Structured request audit logs | ClickHouse |
 | Full-text troubleshooting over raw logs | Elasticsearch |
@@ -210,7 +210,7 @@ Avoid storing raw prompts and model outputs unless there is an explicit product,
 
 A practical production split is:
 
-- OpenMeter for metering, quota, success/failure totals, and billing.
+- OpenMeter for metering, customer entitlements, quota decisions, success/failure totals, and billing.
 - ClickHouse for durable structured request/audit logs.
 - Elasticsearch for short-retention raw application logs and incident search, if the team needs Kibana-style troubleshooting.
 - S3 or another object store for low-cost immutable archive.

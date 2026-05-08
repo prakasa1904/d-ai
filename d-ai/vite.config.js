@@ -22,7 +22,14 @@ export default defineConfig(({mode}) => {
     eventType: env.OPENMETER_EVENT_TYPE || "prompt",
     eventSource: env.OPENMETER_EVENT_SOURCE || "d-ai",
     subjectMode: env.OPENMETER_SUBJECT_MODE || "token",
-    failClosed: env.OPENMETER_FAIL_CLOSED || "false",
+    failClosed: env.OPENMETER_FAIL_CLOSED || "true",
+    entitlementsEnabled: env.OPENMETER_ENTITLEMENTS_ENABLED || "true",
+    totalTokensFeatureKey: env.OPENMETER_TOTAL_TOKENS_FEATURE_KEY || "d_ai_token_quota",
+    requestsPerMinuteFeatureKey: env.OPENMETER_REQUESTS_PER_MINUTE_FEATURE_KEY || "d_ai_minute_requests",
+    requestsPerHourFeatureKey: env.OPENMETER_REQUESTS_PER_HOUR_FEATURE_KEY || "d_ai_hourly_requests",
+    tokensPerDayFeatureKey: env.OPENMETER_TOKENS_PER_DAY_FEATURE_KEY || "d_ai_daily_tokens",
+    requestsPerDayFeatureKey: env.OPENMETER_REQUESTS_PER_DAY_FEATURE_KEY || "d_ai_daily_requests",
+    totalTokensEntitlementPeriod: env.OPENMETER_TOTAL_TOKENS_ENTITLEMENT_PERIOD || "P100Y",
   };
   const auditLog = {
     enabled: env.D_AI_AUDIT_LOG_ENABLED || "true",

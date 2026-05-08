@@ -1313,11 +1313,13 @@ textarea:focus {
   gap: 8px;
 }
 
+.ghost-button.danger,
 .small-button.danger {
   color: #9c3d1d;
   border-color: #f1c0ad;
 }
 
+.ghost-button.danger:hover:not(:disabled),
 .small-button.danger:hover:not(:disabled) {
   border-color: #9c3d1d;
   color: #9c3d1d;
