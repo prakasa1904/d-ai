@@ -1,6 +1,6 @@
 # D-AI
 
-Custom React frontend for a local Casdoor + Casibase stack. It includes Casdoor login and registration, Casibase chat, editable chat history, streaming steer/stop controls, usage dashboard, token management, optional token limits, user profile management, and a local OpenAI-compatible chat endpoint.
+Custom React frontend for a local Casdoor + Casibase + OpenMeter stack. It includes Casdoor login and registration, Casibase chat, editable chat history, streaming steer/stop controls, usage dashboard, token management, OpenMeter-backed usage metering, optional token limits, user profile management, and a local OpenAI-compatible chat endpoint.
 
 ## Prerequisites
 
@@ -16,13 +16,13 @@ Custom React frontend for a local Casdoor + Casibase stack. It includes Casdoor 
 
 ## Bootstrap
 
-Start Casdoor first, seed the required Casdoor data, then start Casibase:
+Start Casdoor first, seed the required Casdoor data, then start Casibase, MinIO, OpenMeter, and the D-AI logging stack:
 
 ```bash
 cd /Users/nedya.prakasa/Projects/casibase
 docker compose up -d casdoor-db casdoor
 ./scripts/seed-casdoor.sh
-docker compose up -d casibase-db minio minio-init casibase
+docker compose up -d casibase-db minio minio-init openmeter openmeter-sink-worker openmeter-balance-worker d-ai-clickhouse d-ai-otel-collector casibase
 ./scripts/seed-casibase-minio-store.sh
 ```
 
@@ -47,6 +47,8 @@ http://localhost:5174/
 ```
 
 Vite may use `5173` if that port is available.
+
+OpenMeter is required for D-AI token usage metering and quota checks. D-AI request audit logs are shipped by OpenTelemetry Collector into ClickHouse. See [OpenMeter Integration](docs/openmeter-integration.md) and [Logging Storage Options](docs/logging-storage-options.md).
 
 ## Seeded Local Data
 
@@ -111,6 +113,8 @@ Casdoor target:  http://casdoor.local:8000
 Casibase target: http://casibase.local:14000
 MinIO API:       http://localhost:9000
 MinIO console:   http://localhost:9001
+OpenMeter API:   http://localhost:48888
+D-AI logs SQL:   http://localhost:18123
 Shared store:    admin/ifm-v0
 ```
 
@@ -134,9 +138,10 @@ D-AI also adds local Vite middleware routes:
 ```text
 /api/d-ai/casdoor-token       Exchanges a Casdoor OAuth code for a profile access token
 /api/d-ai/upload-file         Uploads chat attachments into the configured Casibase store
-/api/d-ai/token-state         Reads or bootstraps the signed-in user's D-AI token state
-/api/d-ai/token-action        Mutates tokens, limits, status, deletion, and usage on the server side
-/api/d-ai/token-limit-check   Checks current server-side limits before browser chat sends to Casibase
+/api/d-ai/token-state         Reads or bootstraps the signed-in user's D-AI token metadata
+/api/d-ai/token-action        Mutates token metadata and emits usage/request events
+/api/d-ai/token-limit-check   Checks OpenMeter-backed token limits before browser chat sends to Casibase
+/api/d-ai/token-metrics       Returns OpenMeter-backed token dashboard metrics
 /api/v1/models                Lists the D-AI OpenAI-compatible model ID
 /api/v1/histories             Lists API histories for the bearer token
 /api/v1/history               Gets one API history by key, including messages when available
@@ -160,10 +165,25 @@ VITE_CASIBASE_SHARED_STORE_ID=admin/ifm-v0
 D_AI_UPLOAD_ADMIN_ORGANIZATION=built-in
 D_AI_UPLOAD_ADMIN_USERNAME=admin
 D_AI_UPLOAD_ADMIN_PASSWORD=123
+OPENMETER_ENABLED=true
+OPENMETER_BASE_URL=http://localhost:48888
+OPENMETER_API_TOKEN=
+OPENMETER_METER_SLUG=tokens_total
+OPENMETER_REQUEST_METER_SLUG=requests_total
+OPENMETER_PROMPT_METER_SLUG=prompt_tokens_total
+OPENMETER_COMPLETION_METER_SLUG=completion_tokens_total
+OPENMETER_COST_METER_SLUG=cost_total
+OPENMETER_EVENT_TYPE=prompt
+OPENMETER_EVENT_SOURCE=d-ai
+OPENMETER_SUBJECT_MODE=token
+OPENMETER_FAIL_CLOSED=false
+D_AI_AUDIT_LOG_ENABLED=true
+D_AI_AUDIT_LOG_FILE=.d-ai-state/logs/request-audit.jsonl
 ```
 
 `VITE_CASDOOR_CLIENT_SECRET` is used by the local Vite middleware for development profile updates. Do not expose this dev middleware directly to untrusted clients.
 `D_AI_UPLOAD_ADMIN_*` is used only by the local Vite middleware to call Casibase file upload APIs that require admin privilege. Replace it with a service account or a tighter backend permission model before production.
+For D-AI backend + OpenMeter usage metering and quota checks, see [OpenMeter Integration](docs/openmeter-integration.md). For OpenTelemetry + ClickHouse audit logging, see [Logging Storage Options](docs/logging-storage-options.md).
 
 ## Useful Commands
 
@@ -183,7 +203,7 @@ Restart `npm run dev` after changing `vite.config.js`, server middleware, or `.e
 - Chat page: create new chats, upload image attachments into the selected Casibase store, forward image metadata into prompts, open history, rename chats, delete chats, and stop or steer an active streaming response.
 - Dashboard page: view signed-in user chat and message usage.
 - Tokens summary page (`/tokens`): create/copy/delete/activate/deactivate D-AI tokens, monitor fleet-level request success rate, failed requests, failure breakdown, token usage, and open token details.
-- Token detail page (`/tokens/{token-id}`): inspect one token's metadata, API reference, rate limits, usage charts, failure charts, and request logs.
+- Token detail page (`/tokens/{token-id}`): inspect one token's metadata, API reference, OpenMeter-backed rate limits, usage charts, failure charts, and request events.
 - Profile page: update Casdoor profile fields such as display name, avatar, contact info, work info, preferences, and bio.
 
 Profile updates require a Casdoor access token. New logins obtain it automatically. If you were already signed in before this feature was added, open `Profile`, enter your current password in `Confirm Access`, and save again.
@@ -192,7 +212,7 @@ Casibase can still generate its own chat titles, such as `New Chat - 1`, after a
 
 Chat attachments are intentionally limited to images in D-AI. Casibase's document/vector indexer does not support image extensions such as `.jpeg`, so D-AI stores the image and sends image metadata/URL context to the chat instead of treating the upload as a text document. Image understanding still depends on the selected Casibase model provider: use a vision-capable model, and make sure the image URL is reachable by that model runtime.
 
-D-AI token state is handled by the local middleware in development. For ownership boundaries, local persistence, security, and production guidance, see [Application Responsibilities](docs/application-responsibilities.md).
+D-AI token metadata is handled by the local middleware in development. Usage metrics, request metrics, and quota counters come from OpenMeter. Detailed request audit logs are written outside token state and shipped to ClickHouse by OpenTelemetry Collector. For ownership boundaries, local persistence, security, and production guidance, see [Application Responsibilities](docs/application-responsibilities.md).
 
 For `/api/v1/chat/completions`, reuse the same `X-D-AI-History-Key` header to append requests to the same Casibase chat history. If the header is omitted, D-AI uses `default`, so each token has one stable default API conversation. Use a different history key only when you want a separate API conversation.
 
@@ -375,7 +395,7 @@ curl 'http://localhost:5174/api/v1/history?key=openclaw%3Acasibase%3Adebug-login
   -H 'Authorization: Bearer <D_AI_TOKEN>'
 ```
 
-Tokens are synced from the browser into the local Vite API layer after sign-in. If a new token is rejected by curl, refresh D-AI once while signed in and try again. The local state file is documented in [Application Responsibilities](docs/application-responsibilities.md).
+Tokens are synced from the browser into the local Vite API layer after sign-in. If a new token is rejected by curl, refresh D-AI once while signed in and try again. The local state file stores token metadata only. OpenMeter is the source for usage and quota metrics, and ClickHouse is the local audit log store. See [Application Responsibilities](docs/application-responsibilities.md).
 
 ## Production Note
 

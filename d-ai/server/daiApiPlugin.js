@@ -6,6 +6,8 @@ import {
   getTokenLimitStatus,
   normalizeTokenLimits,
 } from "../src/tokens.js";
+import {createOpenMeterClient} from "./openmeter.js";
+import {createAuditLogger} from "./auditLogger.js";
 
 const apiModel = "d-ai-casibase";
 const stateDirectory = ".d-ai-state";
@@ -54,8 +56,6 @@ function emptyTokenState() {
   return {
     version: 1,
     tokens: [],
-    usage: [],
-    requestEvents: [],
   };
 }
 
@@ -90,8 +90,6 @@ function normalizeState(state) {
     ...emptyTokenState(),
     ...state,
     tokens: Array.isArray(state?.tokens) ? state.tokens.map(normalizeToken) : [],
-    usage: Array.isArray(state?.usage) ? state.usage : [],
-    requestEvents: Array.isArray(state?.requestEvents) ? state.requestEvents : [],
   };
 }
 
@@ -113,37 +111,7 @@ function publicTokenState(accountState = {}) {
   return {
     ...emptyTokenState(),
     tokens: Array.isArray(accountState.tokens) ? accountState.tokens.map(publicToken) : [],
-    usage: Array.isArray(accountState.usage) ? accountState.usage : [],
-    requestEvents: Array.isArray(accountState.requestEvents) ? accountState.requestEvents : [],
   };
-}
-
-function mergeUsage(left = [], right = []) {
-  const byId = new Map();
-
-  [...left, ...right].forEach((entry) => {
-    if (entry?.id) {
-      byId.set(entry.id, entry);
-    }
-  });
-
-  return [...byId.values()]
-    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
-    .slice(0, 1000);
-}
-
-function mergeRequestEvents(left = [], right = []) {
-  const byId = new Map();
-
-  [...left, ...right].forEach((entry) => {
-    if (entry?.id) {
-      byId.set(entry.id, entry);
-    }
-  });
-
-  return [...byId.values()]
-    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
-    .slice(0, 2000);
 }
 
 function requestEventFromUsage(usageRecord, event = {}) {
@@ -194,6 +162,50 @@ function failureRequestEvent({tokenId, source = "chat", httpStatus = 500, errorT
   };
 }
 
+async function effectiveTokenLimitStatus({token, accountState, pendingTokens = 0, openMeter}) {
+  const localStatus = getTokenLimitStatus(token, [], pendingTokens);
+
+  if (!openMeter?.enabled) {
+    return localStatus;
+  }
+
+  const openMeterStatus = await openMeter.checkTokenLimits({token, accountState, pendingTokens});
+  if (!openMeterStatus?.enabled) {
+    return localStatus;
+  }
+
+  if (openMeterStatus.warning) {
+    return {
+      ...localStatus,
+      metering: {
+        provider: "openmeter",
+        status: "fallback",
+        warning: openMeterStatus.warning,
+        subject: openMeterStatus.subject,
+        meterSlug: openMeterStatus.meterSlug,
+      },
+    };
+  }
+
+  const checks = openMeterStatus.checks || [];
+  const blocked = checks.filter((check) => check.blocked);
+  const reasons = openMeterStatus.reasons || [];
+
+  return {
+    ...localStatus,
+    allowed: openMeterStatus.allowed !== false && blocked.length === 0,
+    reasons,
+    checks,
+    metering: {
+      provider: "openmeter",
+      status: openMeterStatus.error ? "error" : "active",
+      subject: openMeterStatus.subject,
+      meterSlug: openMeterStatus.meterSlug,
+      error: openMeterStatus.error || "",
+    },
+  };
+}
+
 function getStatePath(root) {
   return path.join(root, stateDirectory, stateFilename);
 }
@@ -201,10 +213,21 @@ function getStatePath(root) {
 async function loadServerState(root) {
   try {
     const text = await fs.readFile(getStatePath(root), "utf8");
-    return {
+    const state = {
       ...emptyServerState(),
       ...JSON.parse(text),
     };
+    state.accounts = Object.fromEntries(Object.entries(state.accounts || {}).map(([key, accountState]) => {
+      const tokens = Array.isArray(accountState?.tokens) ? accountState.tokens : [];
+
+      return [key, {
+        ...accountState,
+        tokens,
+        usage: undefined,
+        requestEvents: undefined,
+      }];
+    }));
+    return state;
   } catch {
     return emptyServerState();
   }
@@ -238,8 +261,6 @@ function ensureAccountState(state, account, sessionCookie) {
     account: publicAccount(account),
     sessionCookie: sessionCookie || previous.sessionCookie || "",
     tokens: Array.isArray(previous.tokens) ? previous.tokens : [],
-    usage: Array.isArray(previous.usage) ? previous.usage : [],
-    requestEvents: Array.isArray(previous.requestEvents) ? previous.requestEvents : [],
     updatedAt: now(),
   };
 
@@ -490,15 +511,13 @@ async function syncTokenState({request, response, root, casibaseTarget}) {
   if (accountState.tokens.length === 0 && incoming.tokens.length > 0) {
     accountState.tokens = incoming.tokens.map((token) => privateToken(token, account, sessionCookie));
   }
-  accountState.usage = mergeUsage(accountState.usage, incoming.usage);
-  accountState.requestEvents = mergeRequestEvents(accountState.requestEvents, incoming.requestEvents);
   accountState.updatedAt = now();
 
   await saveServerState(root, state);
   sendJson(response, 200, {status: "ok", data: publicTokenState(accountState)});
 }
 
-async function mutateTokenState({request, response, root, casibaseTarget}) {
+async function mutateTokenState({request, response, root, casibaseTarget, openMeter, auditLogger}) {
   if (request.method !== "POST") {
     sendError(response, 405, "Only POST is supported");
     return;
@@ -509,6 +528,7 @@ async function mutateTokenState({request, response, root, casibaseTarget}) {
   const state = await loadServerState(root);
   const {accountState} = ensureAccountState(state, account, sessionCookie);
   let changedToken = null;
+  let changedUsageEntry = null;
 
   if (body.action === "create-token") {
     changedToken = createServerToken(body.name, body.limits, account, sessionCookie);
@@ -542,8 +562,6 @@ async function mutateTokenState({request, response, root, casibaseTarget}) {
   } else if (body.action === "delete-token") {
     const existed = accountState.tokens.some((token) => token.id === body.tokenId);
     accountState.tokens = accountState.tokens.filter((token) => token.id !== body.tokenId);
-    accountState.usage = accountState.usage.filter((entry) => entry.tokenId !== body.tokenId);
-    accountState.requestEvents = accountState.requestEvents.filter((entry) => entry.tokenId !== body.tokenId);
     changedToken = existed ? {id: body.tokenId} : null;
   } else if (body.action === "record-usage") {
     const entry = {
@@ -557,11 +575,11 @@ async function mutateTokenState({request, response, root, casibaseTarget}) {
       return;
     }
 
-    accountState.usage = mergeUsage([entry], accountState.usage);
-    accountState.requestEvents = mergeRequestEvents([requestEventFromUsage(entry, body.event)], accountState.requestEvents);
     accountState.tokens = accountState.tokens.map((token) => token.id === entry.tokenId
       ? {...token, lastUsedAt: entry.createdAt, updatedAt: now()}
       : token);
+    changedToken = accountState.tokens.find((token) => token.id === entry.tokenId) || null;
+    changedUsageEntry = entry;
   } else if (body.action === "record-request") {
     const event = {
       ...body.event,
@@ -575,7 +593,20 @@ async function mutateTokenState({request, response, root, casibaseTarget}) {
       return;
     }
 
-    accountState.requestEvents = mergeRequestEvents([event], accountState.requestEvents);
+    const eventToken = accountState.tokens.find((token) => token.id === event.tokenId);
+    if (event.status !== "success") {
+      openMeter?.recordRequestFailure({
+        token: eventToken,
+        account: accountState.account,
+        event,
+      }).catch(() => null);
+    }
+    auditLogger?.recordRequest({
+      token: eventToken,
+      account: accountState.account,
+      event,
+      endpoint: "/api/d-ai/token-action",
+    }).catch(() => null);
   } else {
     sendError(response, 400, "Unsupported token action");
     return;
@@ -589,6 +620,22 @@ async function mutateTokenState({request, response, root, casibaseTarget}) {
   accountState.updatedAt = now();
   await saveServerState(root, state);
 
+  if (body.action === "record-usage" && changedToken) {
+    openMeter?.recordUsage({
+      token: changedToken,
+      account: accountState.account,
+      usageRecord: changedUsageEntry,
+      source: "chat",
+    }).catch(() => null);
+    auditLogger?.recordRequest({
+      token: changedToken,
+      account: accountState.account,
+      usageRecord: changedUsageEntry,
+      event: requestEventFromUsage(changedUsageEntry, {source: "chat"}),
+      endpoint: "/api/d-ai/token-action",
+    }).catch(() => null);
+  }
+
   sendJson(response, 200, {
     status: "ok",
     data: {
@@ -598,7 +645,7 @@ async function mutateTokenState({request, response, root, casibaseTarget}) {
   });
 }
 
-async function checkTokenLimit({request, response, root, casibaseTarget}) {
+async function checkTokenLimit({request, response, root, casibaseTarget, openMeter, auditLogger}) {
   if (request.method !== "POST") {
     sendError(response, 405, "Only POST is supported");
     return;
@@ -617,37 +664,55 @@ async function checkTokenLimit({request, response, root, casibaseTarget}) {
   }
 
   if (token.status !== "Active") {
-    accountState.requestEvents = mergeRequestEvents([
-      failureRequestEvent({
-        tokenId: token.id,
-        source: "chat",
-        httpStatus: 401,
-        errorType: "authentication_error",
-        errorMessage: "D-AI token is inactive",
-        failureStage: "auth",
-        promptTokens: pendingTokens,
-      }),
-    ], accountState.requestEvents);
+    const event = failureRequestEvent({
+      tokenId: token.id,
+      source: "chat",
+      httpStatus: 401,
+      errorType: "authentication_error",
+      errorMessage: "D-AI token is inactive",
+      failureStage: "auth",
+      promptTokens: pendingTokens,
+    });
     await saveServerState(root, state);
+    openMeter?.recordRequestFailure({
+      token,
+      account: accountState.account,
+      event,
+    }).catch(() => null);
+    auditLogger?.recordRequest({
+      token,
+      account: accountState.account,
+      event,
+      endpoint: "/api/d-ai/token-limit-check",
+    }).catch(() => null);
     sendError(response, 401, "D-AI token is inactive", "authentication_error");
     return;
   }
 
-  const limitStatus = getTokenLimitStatus(token, accountState.usage, pendingTokens);
+  const limitStatus = await effectiveTokenLimitStatus({token, accountState, pendingTokens, openMeter});
   if (!limitStatus.allowed) {
-    accountState.requestEvents = mergeRequestEvents([
-      failureRequestEvent({
-        tokenId: token.id,
-        source: "chat",
-        httpStatus: 429,
-        errorType: "rate_limit_exceeded",
-        errorMessage: limitStatus.reasons.join("; "),
-        failureStage: "limit_check",
-        promptTokens: pendingTokens,
-      }),
-    ], accountState.requestEvents);
+    const event = failureRequestEvent({
+      tokenId: token.id,
+      source: "chat",
+      httpStatus: 429,
+      errorType: "rate_limit_exceeded",
+      errorMessage: limitStatus.reasons.join("; "),
+      failureStage: "limit_check",
+      promptTokens: pendingTokens,
+    });
     state.accounts[key] = accountState;
     await saveServerState(root, state);
+    openMeter?.recordRequestFailure({
+      token,
+      account: accountState.account,
+      event,
+    }).catch(() => null);
+    auditLogger?.recordRequest({
+      token,
+      account: accountState.account,
+      event,
+      endpoint: "/api/d-ai/token-limit-check",
+    }).catch(() => null);
     sendError(response, 429, limitStatus.reasons.join("; "), "rate_limit_exceeded");
     return;
   }
@@ -660,6 +725,30 @@ async function checkTokenLimit({request, response, root, casibaseTarget}) {
       state: publicTokenState(accountState),
       token: publicToken(token),
     },
+  });
+}
+
+async function getTokenMetrics({request, response, root, casibaseTarget, openMeter}) {
+  if (request.method !== "GET") {
+    sendError(response, 405, "Only GET is supported");
+    return;
+  }
+
+  const {account, sessionCookie} = await signedInAccount({request, casibaseTarget});
+  const state = await loadServerState(root);
+  const {accountState} = ensureAccountState(state, account, sessionCookie);
+  const url = new URL(request.url || "/", "http://localhost");
+  const periodDays = Number(url.searchParams.get("periodDays") || 7);
+  const selectedTokenId = url.searchParams.get("tokenId") || "all";
+  const metrics = await openMeter.getTokenMetrics({
+    accountState,
+    periodDays,
+    selectedTokenId,
+  });
+
+  sendJson(response, 200, {
+    status: "ok",
+    data: metrics,
   });
 }
 
@@ -904,9 +993,8 @@ function historyKeyFromRequest(request, body) {
 }
 
 function chatNameForHistory({account, token, historyKey}) {
-  const tokenPart = String(token?.id || "token").replace(/[^a-zA-Z0-9_]/g, "_").slice(0, 38);
   const hash = stableHash(`${account?.owner || ""}/${account?.name || ""}/${token?.id || ""}/${historyKey}`);
-  return `chat_dai_api_${tokenPart}_${hash}`;
+  return `${tokenChatPrefix(token)}${hash}`;
 }
 
 function emptyApiHistory(token, historyKey) {
@@ -934,105 +1022,56 @@ function emptyApiHistory(token, historyKey) {
   };
 }
 
-function ensureApiHistory(byKey, token, historyKey) {
-  const normalized = normalizeHistoryKey(historyKey);
-  if (!byKey.has(normalized)) {
-    byKey.set(normalized, emptyApiHistory(token, normalized));
-  }
-  return byKey.get(normalized);
+function tokenChatPrefix(token) {
+  const tokenPart = String(token?.id || "token").replace(/[^a-zA-Z0-9_]/g, "_").slice(0, 38);
+  return `chat_dai_api_${tokenPart}_`;
 }
 
-function applyHistoryTimestamp(history, createdAt) {
-  if (!createdAt) {
-    return;
-  }
+function apiHistoryFromChat(chat, token) {
+  const historyKey = historyKeyFromRecord({chatTitle: chat?.displayName}) || "default";
+  const history = emptyApiHistory(token, historyKey);
+  const messageCount = Number(chat?.messageCount || 0);
+  const requestCount = messageCount > 0 ? Math.ceil(messageCount / 2) : 0;
 
-  if (!history.createdAt || String(createdAt).localeCompare(String(history.createdAt)) < 0) {
-    history.createdAt = createdAt;
-  }
-
-  if (!history.lastUsedAt || String(createdAt).localeCompare(String(history.lastUsedAt)) > 0) {
-    history.lastUsedAt = createdAt;
-  }
+  return {
+    ...history,
+    chatName: chat?.name || "",
+    chatTitle: chat?.displayName || chat?.name || history.chatTitle,
+    createdAt: chat?.createdTime || "",
+    lastUsedAt: chat?.updatedTime || chat?.createdTime || "",
+    requestCount,
+    successCount: requestCount,
+    lastStatus: requestCount > 0 ? "success" : "",
+    lastHttpStatus: requestCount > 0 ? 200 : 0,
+    lastModelProvider: chat?.modelProvider || "",
+  };
 }
 
-function applyHistoryMetadata(history, record = {}) {
-  if (record.chatName) {
-    history.chatName = record.chatName;
+async function listCasibaseApiHistories({client, account, token, sessionCookie}) {
+  if (!sessionCookie) {
+    return [];
   }
-  if (record.chatTitle) {
-    history.chatTitle = record.chatTitle;
-  }
-  if (record.modelProvider) {
-    history.lastModelProvider = record.modelProvider;
-  }
-}
 
-function addHistoryTokens(history, record = {}) {
-  history.promptTokens += Number(record.promptTokens || 0);
-  history.responseTokens += Number(record.responseTokens || 0);
-  history.totalTokens += Number(record.totalTokens || 0);
-}
+  const query = new URLSearchParams({
+    user: account?.name || token?.account?.name || "",
+    selectedUser: "",
+    store: "",
+    p: "-1",
+    pageSize: "-1",
+    field: "user",
+    value: account?.name || token?.account?.name || "",
+    sortField: "",
+    sortOrder: "",
+    startTime: "",
+    endTime: "",
+  });
+  const result = await client.get(`/api/get-chats?${query.toString()}`, sessionCookie);
+  const chats = assertCasibaseOk(result, "Failed to load API histories from Casibase").data || [];
+  const prefix = tokenChatPrefix(token);
 
-function buildApiHistories(accountState = {}, token = {}) {
-  const byKey = new Map();
-  const tokenId = token?.id || "";
-  const usageCountedByEvent = new Set();
-
-  (accountState.requestEvents || [])
-    .filter((event) => event?.tokenId === tokenId && event?.source === "api")
-    .forEach((event) => {
-      const historyKey = historyKeyFromRecord(event);
-      if (!historyKey) {
-        return;
-      }
-
-      const history = ensureApiHistory(byKey, token, historyKey);
-      history.requestCount += 1;
-      if (event.status === "success") {
-        history.successCount += 1;
-      } else {
-        history.failedCount += 1;
-      }
-
-      history.lastStatus = event.status || history.lastStatus;
-      history.lastHttpStatus = Number(event.httpStatus || history.lastHttpStatus || 0);
-      history.lastError = event.errorMessage || history.lastError;
-      history.lastFailureStage = event.failureStage || history.lastFailureStage;
-
-      applyHistoryTimestamp(history, event.createdAt);
-      applyHistoryMetadata(history, event);
-      addHistoryTokens(history, event);
-
-      if (event.usageId) {
-        usageCountedByEvent.add(event.usageId);
-      }
-    });
-
-  (accountState.usage || [])
-    .filter((entry) => entry?.tokenId === tokenId)
-    .forEach((entry) => {
-      const historyKey = historyKeyFromRecord(entry);
-      if (!historyKey) {
-        return;
-      }
-
-      const history = ensureApiHistory(byKey, token, historyKey);
-      const alreadyCounted = entry.id && usageCountedByEvent.has(entry.id);
-
-      if (!alreadyCounted) {
-        history.requestCount += 1;
-        history.successCount += 1;
-        history.lastStatus = "success";
-        history.lastHttpStatus = 200;
-        addHistoryTokens(history, entry);
-      }
-
-      applyHistoryTimestamp(history, entry.createdAt);
-      applyHistoryMetadata(history, entry);
-    });
-
-  return [...byKey.values()]
+  return chats
+    .filter((chat) => String(chat?.name || "").startsWith(prefix))
+    .map((chat) => apiHistoryFromChat(chat, token))
     .sort((a, b) => String(b.lastUsedAt || "").localeCompare(String(a.lastUsedAt || "")));
 }
 
@@ -1178,7 +1217,7 @@ function buildUsageRecord({tokenId, historyKey, chat, messages, answerName, prom
   };
 }
 
-async function saveUsage({root, key, tokenId, usageRecord}) {
+async function saveUsage({root, key, tokenId, usageRecord, openMeter, auditLogger, token}) {
   const state = await loadServerState(root);
   const accountState = state.accounts[key];
 
@@ -1186,17 +1225,30 @@ async function saveUsage({root, key, tokenId, usageRecord}) {
     return;
   }
 
-  accountState.usage = mergeUsage([usageRecord], accountState.usage);
-  accountState.requestEvents = mergeRequestEvents([requestEventFromUsage(usageRecord, {source: "api"})], accountState.requestEvents);
+  const event = requestEventFromUsage(usageRecord, {source: "api"});
+  const changedToken = token || accountState.tokens?.find((item) => item.id === tokenId);
   accountState.tokens = (accountState.tokens || []).map((token) => token.id === tokenId
     ? {...token, lastUsedAt: usageRecord.createdAt}
     : token);
   accountState.updatedAt = now();
 
   await saveServerState(root, state);
+
+  openMeter?.recordUsage({
+    token: changedToken,
+    account: accountState.account,
+    usageRecord,
+    source: "api",
+  }).catch(() => null);
+  auditLogger?.recordRequest({
+    token: changedToken,
+    account: accountState.account,
+    usageRecord,
+    event,
+  }).catch(() => null);
 }
 
-async function saveRequestFailure({root, key, event}) {
+async function saveRequestFailure({root, key, event, openMeter, auditLogger}) {
   const state = await loadServerState(root);
   const accountState = state.accounts[key];
 
@@ -1204,10 +1256,21 @@ async function saveRequestFailure({root, key, event}) {
     return;
   }
 
-  accountState.requestEvents = mergeRequestEvents([event], accountState.requestEvents);
+  const token = accountState.tokens?.find((token) => token.id === event.tokenId);
   accountState.updatedAt = now();
 
   await saveServerState(root, state);
+
+  openMeter?.recordRequestFailure({
+    token,
+    account: accountState.account,
+    event,
+  }).catch(() => null);
+  auditLogger?.recordRequest({
+    token,
+    account: accountState.account,
+    event,
+  }).catch(() => null);
 }
 
 function writeSse(response, payload) {
@@ -1369,7 +1432,7 @@ async function handleModels({request, response, root}) {
   });
 }
 
-async function handleApiHistories({request, response, root}) {
+async function handleApiHistories({request, response, root, casibaseTarget}) {
   if (request.method !== "GET") {
     sendError(response, 405, "Only GET is supported");
     return;
@@ -1385,7 +1448,14 @@ async function handleApiHistories({request, response, root}) {
   const url = new URL(request.url || "/", "http://localhost");
   const requestedLimit = Number(url.searchParams.get("limit") || 50);
   const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 50, 1), 100);
-  const histories = buildApiHistories(match.accountState, match.token);
+  const client = casibaseClient(casibaseTarget);
+  const account = match.token.account || match.accountState.account;
+  const histories = await listCasibaseApiHistories({
+    client,
+    account,
+    token: match.token,
+    sessionCookie: match.accountState.sessionCookie,
+  });
 
   sendJson(response, 200, {
     object: "list",
@@ -1411,8 +1481,7 @@ async function handleApiHistoryDetail({request, response, root, casibaseTarget})
   const historyKey = normalizeHistoryKey(url.searchParams.get("key") || url.searchParams.get("historyKey") || "default");
   const account = match.token.account || match.accountState.account;
   const chatName = chatNameForHistory({account, token: match.token, historyKey});
-  const knownHistory = buildApiHistories(match.accountState, match.token).find((history) => history.historyKey === historyKey);
-  const history = knownHistory || emptyApiHistory(match.token, historyKey);
+  let history = emptyApiHistory(match.token, historyKey);
   const client = casibaseClient(casibaseTarget);
   let messages = [];
 
@@ -1420,9 +1489,7 @@ async function handleApiHistoryDetail({request, response, root, casibaseTarget})
     const chat = await getChat(client, chatName, match.accountState.sessionCookie).catch(() => null);
     if (chat) {
       const rawMessages = await getMessages(client, chat, match.accountState.sessionCookie);
-      history.chatName = chat.name || history.chatName;
-      history.chatTitle = chat.displayName || history.chatTitle;
-      history.lastModelProvider = chat.modelProvider || history.lastModelProvider;
+      history = apiHistoryFromChat(chat, match.token);
       messages = rawMessages
         .filter((message) => !message?.isDeleted && !message?.isHidden)
         .map(publicApiMessage);
@@ -1461,7 +1528,7 @@ async function runCasibaseTurn({client, account, historyKey = "default", promptT
   return {chat: updatedChat, answer};
 }
 
-async function handleChatCompletions({request, response, root, casibaseTarget, sharedStoreId}) {
+async function handleChatCompletions({request, response, root, casibaseTarget, sharedStoreId, openMeter, auditLogger}) {
   const requestStartedAt = Date.now();
 
   if (request.method !== "POST") {
@@ -1491,6 +1558,8 @@ async function handleChatCompletions({request, response, root, casibaseTarget, s
     await saveRequestFailure({
       root,
       key: match.key,
+      openMeter,
+      auditLogger,
       event: failureRequestEvent({
         tokenId: match.token.id,
         source: "api",
@@ -1511,6 +1580,8 @@ async function handleChatCompletions({request, response, root, casibaseTarget, s
     await saveRequestFailure({
       root,
       key: match.key,
+      openMeter,
+      auditLogger,
       event: failureRequestEvent({
         tokenId: match.token.id,
         source: "api",
@@ -1531,6 +1602,8 @@ async function handleChatCompletions({request, response, root, casibaseTarget, s
     await saveRequestFailure({
       root,
       key: match.key,
+      openMeter,
+      auditLogger,
       event: failureRequestEvent({
         tokenId: match.token.id,
         source: "api",
@@ -1547,11 +1620,18 @@ async function handleChatCompletions({request, response, root, casibaseTarget, s
     return;
   }
 
-  const limitStatus = getTokenLimitStatus(match.token, match.accountState.usage || [], promptTokens);
+  const limitStatus = await effectiveTokenLimitStatus({
+    token: match.token,
+    accountState: match.accountState,
+    pendingTokens: promptTokens,
+    openMeter,
+  });
   if (!limitStatus.allowed) {
     await saveRequestFailure({
       root,
       key: match.key,
+      openMeter,
+      auditLogger,
       event: failureRequestEvent({
         tokenId: match.token.id,
         source: "api",
@@ -1613,7 +1693,7 @@ async function handleChatCompletions({request, response, root, casibaseTarget, s
         promptText,
         streamedText,
       });
-      await saveUsage({root, key: match.key, tokenId: match.token.id, usageRecord});
+      await saveUsage({root, key: match.key, tokenId: match.token.id, usageRecord, openMeter, auditLogger, token: match.token});
 
       writeSse(response, openAiChunk({id, model, finishReason: "stop"}));
       writeSse(response, "[DONE]");
@@ -1622,6 +1702,8 @@ async function handleChatCompletions({request, response, root, casibaseTarget, s
       await saveRequestFailure({
         root,
         key: match.key,
+        openMeter,
+        auditLogger,
         event: failureRequestEvent({
           tokenId: match.token.id,
           source: "api",
@@ -1667,13 +1749,15 @@ async function handleChatCompletions({request, response, root, casibaseTarget, s
       promptText,
       streamedText: content,
     });
-    await saveUsage({root, key: match.key, tokenId: match.token.id, usageRecord});
+    await saveUsage({root, key: match.key, tokenId: match.token.id, usageRecord, openMeter, auditLogger, token: match.token});
 
     sendJson(response, 200, completionResponse({id, model, content, usage: usageRecord}));
   } catch (error) {
     await saveRequestFailure({
       root,
       key: match.key,
+      openMeter,
+      auditLogger,
       event: failureRequestEvent({
         tokenId: match.token.id,
         source: "api",
@@ -1699,6 +1783,11 @@ function installMiddleware(server, options) {
   const casdoorRedirectUri = options.casdoorRedirectUri;
   const sharedStoreId = options.sharedStoreId || "admin/ifm-v0";
   const uploadAdmin = options.uploadAdmin || {};
+  const openMeter = createOpenMeterClient(options.openMeter || {});
+  const auditLogger = createAuditLogger({
+    root,
+    ...(options.auditLog || {}),
+  });
 
   server.middlewares.use(async (request, response, next) => {
     try {
@@ -1710,12 +1799,17 @@ function installMiddleware(server, options) {
       }
 
       if (url.pathname === "/api/d-ai/token-action") {
-        await mutateTokenState({request, response, root, casibaseTarget});
+        await mutateTokenState({request, response, root, casibaseTarget, openMeter, auditLogger});
         return;
       }
 
       if (url.pathname === "/api/d-ai/token-limit-check") {
-        await checkTokenLimit({request, response, root, casibaseTarget});
+        await checkTokenLimit({request, response, root, casibaseTarget, openMeter, auditLogger});
+        return;
+      }
+
+      if (url.pathname === "/api/d-ai/token-metrics") {
+        await getTokenMetrics({request, response, root, casibaseTarget, openMeter});
         return;
       }
 
@@ -1751,7 +1845,7 @@ function installMiddleware(server, options) {
       }
 
       if (url.pathname === "/api/v1/histories") {
-        await handleApiHistories({request, response, root});
+        await handleApiHistories({request, response, root, casibaseTarget});
         return;
       }
 
@@ -1761,7 +1855,7 @@ function installMiddleware(server, options) {
       }
 
       if (url.pathname === "/api/v1/chat/completions") {
-        await handleChatCompletions({request, response, root, casibaseTarget, sharedStoreId});
+        await handleChatCompletions({request, response, root, casibaseTarget, sharedStoreId, openMeter, auditLogger});
         return;
       }
 

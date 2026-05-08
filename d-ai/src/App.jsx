@@ -9,6 +9,7 @@ import {
   getMessages,
   getServerTokenState,
   getStores,
+  getTokenMetrics,
   loginWithPassword,
   mutateTokenState,
   openAnswerStream,
@@ -29,7 +30,6 @@ import {
   emptyTokenState,
   estimateTokenCount,
   getTokenLimitStatus,
-  getTokenUsageSummary,
   isTokenActive,
   loadTokenState,
   maskToken,
@@ -360,36 +360,6 @@ function buildMonitoringBuckets(days) {
   });
 }
 
-function buildTokenRequestEvents(tokenData) {
-  const events = Array.isArray(tokenData.requestEvents) ? tokenData.requestEvents : [];
-  const usageWithEvents = new Set(events.map((event) => event.usageId).filter(Boolean));
-  const syntheticSuccessEvents = (tokenData.usage || [])
-    .filter((entry) => entry.id && !usageWithEvents.has(entry.id))
-    .map((entry) => ({
-      id: `synthetic_${entry.id}`,
-      tokenId: entry.tokenId,
-      createdAt: entry.createdAt,
-      status: "success",
-      source: "usage",
-      httpStatus: 200,
-      errorType: "",
-      errorMessage: "",
-      failureStage: "",
-      promptTokens: Number(entry.promptTokens || 0),
-      responseTokens: Number(entry.responseTokens || 0),
-      totalTokens: Number(entry.totalTokens || 0),
-      latencyMs: 0,
-      historyKey: entry.historyKey || "",
-      chatName: entry.chatName || "",
-      chatTitle: entry.chatTitle || "",
-      modelProvider: entry.modelProvider || "",
-      usageId: entry.id,
-      isSynthetic: true,
-    }));
-
-  return [...events, ...syntheticSuccessEvents];
-}
-
 function buildTokenRequestSeries(events, days) {
   const series = buildMonitoringBuckets(days);
   const byKey = new Map(series.map((bucket) => [bucket.key, bucket]));
@@ -556,6 +526,85 @@ function tokenLogSummary(events) {
     totalTokens: 0,
     lastSeenAt: "",
   });
+}
+
+function emptyTokenMetricBuckets(days) {
+  return buildMonitoringBuckets(days).map((bucket) => ({
+    ...bucket,
+    requests: 0,
+    promptTokens: 0,
+    responseTokens: 0,
+    totalTokens: 0,
+    price: 0,
+  }));
+}
+
+function emptyTokenMetrics(days = 7, selectedTokenId = "all") {
+  return {
+    enabled: false,
+    source: "openmeter",
+    selectedTokenId,
+    periodDays: days,
+    totals: {
+      requests: 0,
+      success: 0,
+      failed: 0,
+      successRate: null,
+      promptTokens: 0,
+      responseTokens: 0,
+      totalTokens: 0,
+      price: 0,
+    },
+    selectedTotals: {
+      requests: 0,
+      success: 0,
+      failed: 0,
+      successRate: null,
+      promptTokens: 0,
+      responseTokens: 0,
+      totalTokens: 0,
+      price: 0,
+    },
+    byToken: {},
+    requestByToken: {},
+    limitByToken: {},
+    usageSeries: emptyTokenMetricBuckets(days),
+    requestSeries: buildMonitoringBuckets(days),
+    failedStatusChart: {
+      lines: [],
+      series: buildMonitoringBuckets(days),
+    },
+    failureBreakdown: [],
+    requestEvents: [],
+  };
+}
+
+function normalizeTokenMetricsPayload(payload, days, selectedTokenId = "all") {
+  const fallback = emptyTokenMetrics(days, selectedTokenId);
+
+  return {
+    ...fallback,
+    ...payload,
+    totals: {
+      ...fallback.totals,
+      ...(payload?.totals || {}),
+    },
+    selectedTotals: {
+      ...fallback.selectedTotals,
+      ...(payload?.selectedTotals || payload?.totals || {}),
+    },
+    byToken: payload?.byToken || {},
+    requestByToken: payload?.requestByToken || payload?.byToken || {},
+    limitByToken: payload?.limitByToken || {},
+    usageSeries: Array.isArray(payload?.usageSeries) ? payload.usageSeries : fallback.usageSeries,
+    requestSeries: Array.isArray(payload?.requestSeries) ? payload.requestSeries : fallback.requestSeries,
+    failedStatusChart: {
+      lines: Array.isArray(payload?.failedStatusChart?.lines) ? payload.failedStatusChart.lines : [],
+      series: Array.isArray(payload?.failedStatusChart?.series) ? payload.failedStatusChart.series : fallback.failedStatusChart.series,
+    },
+    failureBreakdown: Array.isArray(payload?.failureBreakdown) ? payload.failureBreakdown : [],
+    requestEvents: Array.isArray(payload?.requestEvents) ? payload.requestEvents : [],
+  };
 }
 
 function requestLogDetail(entry) {
@@ -1112,9 +1161,12 @@ function LimitMeter({label, used, limit, missing}) {
   );
 }
 
-function RateLimitTracker({tokenData, selectedTokenId, onSelectedTokenId, onUpdateTokenLimits}) {
+function RateLimitTracker({tokenData, tokenMetrics, selectedTokenId, onSelectedTokenId, onUpdateTokenLimits}) {
   const token = tokenData.tokens.find((item) => item.id === selectedTokenId) || tokenData.tokens[0];
-  const status = useMemo(() => getTokenLimitStatus(token, tokenData.usage), [token, tokenData.usage]);
+  const status = useMemo(() => {
+    const meteredStatus = token ? tokenMetrics?.limitByToken?.[token.id] : null;
+    return meteredStatus?.checks ? meteredStatus : getTokenLimitStatus(token, []);
+  }, [token, tokenMetrics]);
   const limits = token?.limits || {};
   const [draftLimits, setDraftLimits] = useState(normalizeTokenLimits(limits));
   const [saveError, setSaveError] = useState("");
@@ -1848,38 +1900,45 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
   const [notice, setNotice] = useState("");
   const [periodDays, setPeriodDays] = useState(7);
   const [selectedSeriesTokenId, setSelectedSeriesTokenId] = useState("all");
+  const [metrics, setMetrics] = useState(() => emptyTokenMetrics(7, "all"));
+  const [metricsError, setMetricsError] = useState("");
+  const [isLoadingMetrics, setIsLoadingMetrics] = useState(false);
   const [isMutatingToken, setIsMutatingToken] = useState(false);
-  const periodRangeStart = useMemo(() => rangeStartForDays(periodDays), [periodDays]);
-  const periodUsage = useMemo(() => tokenData.usage.filter((entry) => dateInRange(entry.createdAt, periodRangeStart)), [periodRangeStart, tokenData.usage]);
-  const requestEvents = useMemo(() => buildTokenRequestEvents(tokenData), [tokenData]);
-  const periodRequestEvents = useMemo(() => requestEvents.filter((entry) => dateInRange(entry.createdAt, periodRangeStart)), [periodRangeStart, requestEvents]);
-  const periodTokenData = useMemo(() => ({...tokenData, usage: periodUsage}), [periodUsage, tokenData]);
-  const summaries = useMemo(() => getTokenUsageSummary(periodTokenData), [periodTokenData]);
-  const requestSummary = useMemo(() => summarizeRequestEvents(periodRequestEvents), [periodRequestEvents]);
-  const requestByToken = useMemo(() => summarizeRequestsByToken(periodRequestEvents), [periodRequestEvents]);
-  const seriesUsage = useMemo(() => {
-    if (selectedSeriesTokenId === "all") {
-      return periodUsage;
-    }
-
-    return periodUsage.filter((entry) => entry.tokenId === selectedSeriesTokenId);
-  }, [periodUsage, selectedSeriesTokenId]);
-  const seriesRequests = useMemo(() => {
-    if (selectedSeriesTokenId === "all") {
-      return periodRequestEvents;
-    }
-
-    return periodRequestEvents.filter((entry) => entry.tokenId === selectedSeriesTokenId);
-  }, [periodRequestEvents, selectedSeriesTokenId]);
-  const usageSeries = useMemo(() => buildTokenUsageSeries(seriesUsage, periodDays), [periodDays, seriesUsage]);
-  const requestSeries = useMemo(() => buildTokenRequestSeries(seriesRequests, periodDays), [periodDays, seriesRequests]);
-  const failedStatusChart = useMemo(() => buildFailedStatusSeries(seriesRequests, periodDays), [periodDays, seriesRequests]);
-  const failures = useMemo(() => failureBreakdown(periodRequestEvents), [periodRequestEvents]);
-  const recentUsage = useMemo(
-    () => [...periodRequestEvents].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, 10),
-    [periodRequestEvents],
+  const metricsTokenKey = useMemo(
+    () => tokenData.tokens.map((token) => `${token.id}:${token.status || ""}:${token.lastUsedAt || ""}:${JSON.stringify(token.limits || {})}`).join("|"),
+    [tokenData.tokens],
   );
+  const tokenMetrics = useMemo(
+    () => normalizeTokenMetricsPayload(metrics, periodDays, selectedSeriesTokenId),
+    [metrics, periodDays, selectedSeriesTokenId],
+  );
+  const summaries = useMemo(() => ({totals: tokenMetrics.totals, byToken: tokenMetrics.byToken}), [tokenMetrics]);
+  const requestSummary = tokenMetrics.totals;
+  const requestByToken = tokenMetrics.requestByToken || tokenMetrics.byToken;
+  const usageSeries = tokenMetrics.usageSeries;
+  const requestSeries = tokenMetrics.requestSeries;
+  const failedStatusChart = tokenMetrics.failedStatusChart;
+  const failures = tokenMetrics.failureBreakdown;
+  const recentUsage = useMemo(() => tokenMetrics.requestEvents.slice(0, 10), [tokenMetrics.requestEvents]);
   const selectedPeriodLabel = periodLabel(periodDays);
+
+  async function loadMetrics() {
+    setIsLoadingMetrics(true);
+    setMetricsError("");
+
+    try {
+      const nextMetrics = await getTokenMetrics({
+        periodDays,
+        tokenId: selectedSeriesTokenId,
+      });
+      setMetrics(normalizeTokenMetricsPayload(nextMetrics, periodDays, selectedSeriesTokenId));
+    } catch (error) {
+      setMetrics(emptyTokenMetrics(periodDays, selectedSeriesTokenId));
+      setMetricsError(error.message);
+    } finally {
+      setIsLoadingMetrics(false);
+    }
+  }
 
   async function logout() {
     await signOut();
@@ -1963,6 +2022,34 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
     }
   }, [selectedSeriesTokenId, tokenData.tokens]);
 
+  useEffect(() => {
+    let active = true;
+
+    setIsLoadingMetrics(true);
+    setMetricsError("");
+    getTokenMetrics({periodDays, tokenId: selectedSeriesTokenId})
+      .then((nextMetrics) => {
+        if (active) {
+          setMetrics(normalizeTokenMetricsPayload(nextMetrics, periodDays, selectedSeriesTokenId));
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          setMetrics(emptyTokenMetrics(periodDays, selectedSeriesTokenId));
+          setMetricsError(error.message);
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setIsLoadingMetrics(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [periodDays, selectedSeriesTokenId, metricsTokenKey]);
+
   return (
     <main className="chat-shell">
       <AppHeader account={account} currentPath="/tokens" onLogout={logout} onNavigate={onNavigate} />
@@ -2009,7 +2096,9 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
         </div>
 
         {formError ? <div className="error-banner">{formError}</div> : null}
+        {metricsError ? <div className="error-banner">{metricsError}</div> : null}
         {notice ? <div className="success-banner">{notice}</div> : null}
+        {isLoadingMetrics ? <p className="side-note">Refreshing OpenMeter metrics...</p> : null}
 
         <section className="stats-grid" aria-label="Token totals">
           <StatCard label="Tokens" value={tokenData.tokens.length} detail={`${tokenData.tokens.filter(isTokenActive).length} active`} />
@@ -2113,28 +2202,25 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
   const [periodDays, setPeriodDays] = useState(7);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [metrics, setMetrics] = useState(() => emptyTokenMetrics(7, tokenId));
+  const [isLoadingMetrics, setIsLoadingMetrics] = useState(false);
   const [isMutatingToken, setIsMutatingToken] = useState(false);
   const token = tokenData.tokens.find((item) => item.id === tokenId);
-  const periodRangeStart = useMemo(() => rangeStartForDays(periodDays), [periodDays]);
-  const requestEvents = useMemo(() => buildTokenRequestEvents(tokenData), [tokenData]);
-  const periodRequestEvents = useMemo(() => requestEvents.filter((entry) => dateInRange(entry.createdAt, periodRangeStart)), [periodRangeStart, requestEvents]);
-  const tokenRequestEvents = useMemo(() => periodRequestEvents.filter((entry) => entry.tokenId === token?.id), [periodRequestEvents, token?.id]);
-  const tokenUsage = useMemo(
-    () => tokenData.usage.filter((entry) => entry.tokenId === token?.id && dateInRange(entry.createdAt, periodRangeStart)),
-    [periodRangeStart, token?.id, tokenData.usage],
+  const metricsTokenKey = useMemo(
+    () => token ? `${token.id}:${token.status || ""}:${token.lastUsedAt || ""}:${JSON.stringify(token.limits || {})}` : "",
+    [token],
   );
-  const tokenOnlyData = useMemo(() => ({
-    ...tokenData,
-    tokens: token ? [token] : [],
-    usage: tokenUsage,
-  }), [token, tokenData, tokenUsage]);
-  const summaries = useMemo(() => getTokenUsageSummary(tokenOnlyData), [tokenOnlyData]);
-  const usage = token ? summaries.byToken[token.id] || {} : {};
-  const requestSummary = useMemo(() => summarizeRequestEvents(tokenRequestEvents), [tokenRequestEvents]);
-  const requestSeries = useMemo(() => buildTokenRequestSeries(tokenRequestEvents, periodDays), [periodDays, tokenRequestEvents]);
-  const failedStatusChart = useMemo(() => buildFailedStatusSeries(tokenRequestEvents, periodDays), [periodDays, tokenRequestEvents]);
-  const usageSeries = useMemo(() => buildTokenUsageSeries(tokenUsage, periodDays), [periodDays, tokenUsage]);
-  const failures = useMemo(() => failureBreakdown(tokenRequestEvents), [tokenRequestEvents]);
+  const tokenMetrics = useMemo(
+    () => normalizeTokenMetricsPayload(metrics, periodDays, token?.id || tokenId),
+    [metrics, periodDays, token?.id, tokenId],
+  );
+  const periodRequestEvents = tokenMetrics.requestEvents;
+  const usage = token ? tokenMetrics.byToken[token.id] || {} : {};
+  const requestSummary = tokenMetrics.selectedTotals || tokenMetrics.totals;
+  const requestSeries = tokenMetrics.requestSeries;
+  const failedStatusChart = tokenMetrics.failedStatusChart;
+  const usageSeries = tokenMetrics.usageSeries;
+  const failures = tokenMetrics.failureBreakdown;
   const selectedPeriodLabel = periodLabel(periodDays);
 
   async function logout() {
@@ -2205,6 +2291,39 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
     onNavigate(`/tokens/${nextTokenId}`);
   }
 
+  useEffect(() => {
+    if (!token) {
+      setMetrics(emptyTokenMetrics(periodDays, tokenId));
+      return undefined;
+    }
+
+    let active = true;
+
+    setIsLoadingMetrics(true);
+    setError("");
+    getTokenMetrics({periodDays, tokenId: token.id})
+      .then((nextMetrics) => {
+        if (active) {
+          setMetrics(normalizeTokenMetricsPayload(nextMetrics, periodDays, token.id));
+        }
+      })
+      .catch((nextError) => {
+        if (active) {
+          setMetrics(emptyTokenMetrics(periodDays, token.id));
+          setError(nextError.message);
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setIsLoadingMetrics(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [periodDays, token?.id, tokenId, metricsTokenKey]);
+
   if (!token) {
     return (
       <main className="chat-shell">
@@ -2253,6 +2372,7 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
 
         {error ? <div className="error-banner">{error}</div> : null}
         {notice ? <div className="success-banner">{notice}</div> : null}
+        {isLoadingMetrics ? <p className="side-note">Refreshing OpenMeter metrics...</p> : null}
 
         <section className="dashboard-section token-section token-detail-overview">
           <div className="token-detail-main">
@@ -2308,6 +2428,7 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
         </div>
 
         <RateLimitTracker
+          tokenMetrics={tokenMetrics}
           selectedTokenId={token.id}
           tokenData={tokenData}
           onSelectedTokenId={selectToken}
@@ -3249,8 +3370,6 @@ export default function App() {
       ...emptyTokenState(),
       ...next,
       tokens: Array.isArray(next?.tokens) ? next.tokens : [],
-      usage: Array.isArray(next?.usage) ? next.usage : [],
-      requestEvents: Array.isArray(next?.requestEvents) ? next.requestEvents : [],
     };
 
     saveTokenState(account, state);
@@ -3304,47 +3423,13 @@ export default function App() {
       .catch(() => persistTokenData({
         ...tokenData,
         tokens: tokenData.tokens.map((token) => token.id === entry.tokenId ? {...token, lastUsedAt: entry.createdAt} : token),
-        usage: [entry, ...tokenData.usage].slice(0, 500),
-        requestEvents: [
-          {
-            id: `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-            tokenId: entry.tokenId,
-            createdAt: entry.createdAt,
-            status: "success",
-            source: "chat",
-            httpStatus: 200,
-            errorType: "",
-            errorMessage: "",
-            failureStage: "",
-            promptTokens: entry.promptTokens || 0,
-            responseTokens: entry.responseTokens || 0,
-            totalTokens: entry.totalTokens || 0,
-            latencyMs: 0,
-            chatName: entry.chatName || "",
-            chatTitle: entry.chatTitle || "",
-            modelProvider: "",
-            usageId: entry.id,
-          },
-          ...(tokenData.requestEvents || []),
-        ].slice(0, 1000),
       }));
   }
 
   function recordManagedTokenRequest(event) {
     mutateTokenState("record-request", {event})
       .then(applyTokenMutation)
-      .catch(() => persistTokenData({
-        ...tokenData,
-        requestEvents: [
-          {
-            id: event.id || `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-            createdAt: event.createdAt || new Date().toISOString(),
-            status: event.status || "failed",
-            ...event,
-          },
-          ...(tokenData.requestEvents || []),
-        ].slice(0, 1000),
-      }));
+      .catch(() => null);
   }
 
   async function checkManagedTokenLimit(tokenId, promptText) {

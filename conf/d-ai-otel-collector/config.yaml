@@ -1,0 +1,69 @@
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol/file_storage
+    create_directory: true
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  filelog/d-ai-audit:
+    include:
+      - /var/log/d-ai/request-audit.jsonl
+    start_at: beginning
+    storage: file_storage
+    poll_interval: 1s
+    operators:
+      - type: json_parser
+        timestamp:
+          parse_from: attributes.timestamp
+          layout_type: strptime
+          layout: "%Y-%m-%dT%H:%M:%S.%LZ"
+
+processors:
+  resource/d-ai:
+    attributes:
+      - key: service.name
+        value: d-ai
+        action: upsert
+      - key: service.namespace
+        value: local-casibase
+        action: upsert
+      - key: deployment.environment
+        value: local
+        action: upsert
+
+  batch:
+    timeout: 2s
+    send_batch_size: 1000
+
+exporters:
+  clickhouse/d-ai-logs:
+    endpoint: tcp://d-ai-clickhouse:9000?dial_timeout=10s
+    database: d_ai_logs
+    username: default
+    password: default
+    logs_table_name: otel_logs
+    create_schema: true
+    ttl: 2160h
+
+  debug:
+    verbosity: basic
+
+service:
+  extensions:
+    - file_storage
+  pipelines:
+    logs:
+      receivers:
+        - otlp
+        - filelog/d-ai-audit
+      processors:
+        - resource/d-ai
+        - batch
+      exporters:
+        - clickhouse/d-ai-logs

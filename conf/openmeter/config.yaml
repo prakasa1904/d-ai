@@ -1,0 +1,94 @@
+ingest:
+  kafka:
+    broker: openmeter-kafka:9092
+    brokerAddressFamily: v4
+    socketKeepAliveEnable: true
+    topicMetadataRefreshInterval: 10s
+
+aggregation:
+  clickhouse:
+    address: openmeter-clickhouse:9000
+
+sink:
+  minCommitCount: 1
+  namespaceRefetch: 1s
+  namespaceRefetchTimeout: 1s
+  kafka:
+    brokers: openmeter-kafka:9092
+    brokerAddressFamily: v4
+    socketKeepAliveEnable: true
+    topicMetadataRefreshInterval: 10s
+  dedupe:
+    enabled: true
+    driver: redis
+    config:
+      address: openmeter-redis:6379
+      database: 0
+      expiration: 768h
+
+postgres:
+  url: postgres://postgres:postgres@openmeter-postgres:5432/postgres?sslmode=disable
+  autoMigrate: migration
+
+meters:
+  - slug: tokens_total
+    description: D-AI token usage
+    eventType: prompt
+    aggregation: SUM
+    valueProperty: $.tokens
+    groupBy:
+      model: $.model
+      type: $.type
+      source: $.source
+      status: $.status
+      token_id: $.token_id
+  - slug: prompt_tokens_total
+    description: D-AI prompt token usage
+    eventType: prompt
+    aggregation: SUM
+    valueProperty: $.prompt_tokens
+    groupBy:
+      model: $.model
+      type: $.type
+      source: $.source
+      status: $.status
+      http_status: $.http_status
+      token_id: $.token_id
+  - slug: completion_tokens_total
+    description: D-AI completion token usage
+    eventType: prompt
+    aggregation: SUM
+    valueProperty: $.completion_tokens
+    groupBy:
+      model: $.model
+      type: $.type
+      source: $.source
+      status: $.status
+      http_status: $.http_status
+      token_id: $.token_id
+  - slug: requests_total
+    description: D-AI request attempts
+    eventType: prompt
+    aggregation: SUM
+    valueProperty: $.request_count
+    groupBy:
+      model: $.model
+      type: $.type
+      source: $.source
+      status: $.status
+      http_status: $.http_status
+      error_type: $.error_type
+      failure_stage: $.failure_stage
+      token_id: $.token_id
+  - slug: cost_total
+    description: D-AI reported cost
+    eventType: prompt
+    aggregation: SUM
+    valueProperty: $.price
+    groupBy:
+      model: $.model
+      type: $.type
+      source: $.source
+      status: $.status
+      http_status: $.http_status
+      token_id: $.token_id

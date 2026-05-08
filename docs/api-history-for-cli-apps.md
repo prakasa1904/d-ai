@@ -7,7 +7,8 @@ This document describes how CLI applications such as `openclaw` should use the D
 For API clients, authentication and chat history are separate concerns:
 
 ```text
-Token = authentication, quota, and billing owner
+Token = authentication and ownership boundary
+OpenMeter subject = quota, usage, and request metrics owner
 History key = conversation, task, or session context
 ```
 
@@ -85,8 +86,8 @@ The histories response is token-scoped. A token can list only histories created 
 The D-AI chat sidebar is for browser-created chat histories. API histories created by CLI tools are separate operational histories. This is intentional:
 
 - Browser users should not see every background API or CLI session mixed into their normal chat sidebar.
-- API token owners still need observability for usage, failures, limits, and quota.
-- A future token detail view can expose API histories without turning the main chat UI into a noisy audit log.
+- API token owners still need observability for usage, failures, limits, and quota through the token pages.
+- Token pages use OpenMeter-backed metrics so CLI traffic is observable without mixing API histories into the main chat sidebar.
 
 Useful fields for a future API history view:
 
@@ -94,10 +95,10 @@ Useful fields for a future API history view:
 - Token name
 - Created time
 - Last used time
-- Request count
-- Success rate
-- Failed request count
-- Estimated input and output tokens
+- OpenMeter request count
+- OpenMeter success rate
+- OpenMeter failed request count
+- OpenMeter input and output tokens
 - Last model/store used
 - Open read-only history action
 

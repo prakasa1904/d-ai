@@ -70,6 +70,195 @@ services:
         mc mb --ignore-existing local/casibase
         mc anonymous set none local/casibase
 
+  openmeter-kafka:
+    image: confluentinc/cp-kafka:8.0.3
+    container_name: openmeter-kafka
+    restart: unless-stopped
+    environment:
+      CLUSTER_ID: ca497efe-9f82-4b84-890b-d9969a9a2e1c
+      KAFKA_BROKER_ID: 0
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "0@openmeter-kafka:9093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://openmeter-kafka:9092
+      KAFKA_LISTENERS: INTERNAL://openmeter-kafka:9092,CONTROLLER://openmeter-kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_MESSAGE_TIMESTAMP_AFTER_MAX_MS: 9223372036854775807
+    volumes:
+      - openmeter_kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "unset JMX_PORT KAFKA_JMX_OPTS; kafka-topics --bootstrap-server openmeter-kafka:9092 --list",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  openmeter-clickhouse:
+    image: clickhouse/clickhouse-server:25.12.3-alpine
+    container_name: openmeter-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: default
+      CLICKHOUSE_DB: openmeter
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - openmeter_clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://openmeter-clickhouse:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  openmeter-redis:
+    image: redis:7.4.7
+    container_name: openmeter-redis
+    restart: unless-stopped
+    command:
+      [
+        "redis-server",
+        "--maxmemory",
+        "50mb",
+        "--maxmemory-policy",
+        "noeviction",
+        "--maxmemory-samples",
+        "10",
+      ]
+    volumes:
+      - openmeter_redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  openmeter-postgres:
+    image: postgres:14.20-alpine3.23
+    container_name: openmeter-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_HOST_AUTH_METHOD: md5
+    command: ["postgres", "-c", "wal_level=logical"]
+    volumes:
+      - openmeter_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-d", "postgres", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  openmeter:
+    image: ghcr.io/openmeterio/openmeter:latest
+    container_name: openmeter
+    restart: unless-stopped
+    command: openmeter --address 0.0.0.0:8888 --config /etc/openmeter/config.yaml
+    depends_on:
+      openmeter-kafka:
+        condition: service_healthy
+      openmeter-clickhouse:
+        condition: service_healthy
+      openmeter-postgres:
+        condition: service_healthy
+    volumes:
+      - ./conf/openmeter:/etc/openmeter:ro
+    ports:
+      - "48888:8888"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://openmeter:8888/api/v1/debug/metrics"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  openmeter-sink-worker:
+    image: ghcr.io/openmeterio/openmeter:latest
+    container_name: openmeter-sink-worker
+    restart: unless-stopped
+    command: openmeter-sink-worker --config /etc/openmeter/config.yaml
+    depends_on:
+      openmeter:
+        condition: service_healthy
+      openmeter-kafka:
+        condition: service_healthy
+      openmeter-clickhouse:
+        condition: service_healthy
+      openmeter-redis:
+        condition: service_healthy
+    volumes:
+      - ./conf/openmeter:/etc/openmeter:ro
+
+  openmeter-balance-worker:
+    image: ghcr.io/openmeterio/openmeter:latest
+    container_name: openmeter-balance-worker
+    restart: unless-stopped
+    command: openmeter-balance-worker --config /etc/openmeter/config.yaml
+    depends_on:
+      openmeter:
+        condition: service_healthy
+      openmeter-kafka:
+        condition: service_healthy
+      openmeter-clickhouse:
+        condition: service_healthy
+      openmeter-redis:
+        condition: service_healthy
+    volumes:
+      - ./conf/openmeter:/etc/openmeter:ro
+
+  d-ai-clickhouse:
+    image: clickhouse/clickhouse-server:25.12.3-alpine
+    container_name: d-ai-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: default
+      CLICKHOUSE_DB: d_ai_logs
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - d_ai_clickhouse_data:/var/lib/clickhouse
+    ports:
+      - "18123:8123"
+      - "19000:9000"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://d-ai-clickhouse:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  d-ai-otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.142.0
+    container_name: d-ai-otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    depends_on:
+      d-ai-clickhouse:
+        condition: service_healthy
+    volumes:
+      - ./conf/d-ai-otel-collector:/etc/otelcol-contrib:ro
+      - ./d-ai/.d-ai-state/logs:/var/log/d-ai:ro
+      - ./d-ai/.d-ai-state/otelcol:/var/lib/otelcol
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+
   casibase:
     image: casbin/casibase:latest
     container_name: casibase
@@ -103,3 +292,8 @@ volumes:
   casdoor_db_data:
   casibase_db_data:
   minio_data:
+  openmeter_kafka_data:
+  openmeter_clickhouse_data:
+  openmeter_redis_data:
+  openmeter_postgres_data:
+  d_ai_clickhouse_data:

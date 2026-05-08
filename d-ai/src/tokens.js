@@ -4,8 +4,6 @@ export function emptyTokenState() {
   return {
     version: 1,
     tokens: [],
-    usage: [],
-    requestEvents: [],
   };
 }
 
@@ -59,8 +57,6 @@ export function loadTokenState(account) {
       ...emptyTokenState(),
       ...parsed,
       tokens: Array.isArray(parsed?.tokens) ? parsed.tokens.map(normalizeToken) : [],
-      usage: Array.isArray(parsed?.usage) ? parsed.usage : [],
-      requestEvents: Array.isArray(parsed?.requestEvents) ? parsed.requestEvents : [],
     };
   } catch {
     return emptyTokenState();
@@ -73,9 +69,8 @@ export function saveTokenState(account, state) {
   }
 
   localStorage.setItem(storageKey(account), JSON.stringify({
-    ...emptyTokenState(),
-    ...state,
     version: 1,
+    tokens: Array.isArray(state?.tokens) ? state.tokens.map(normalizeToken) : [],
   }));
 }
 

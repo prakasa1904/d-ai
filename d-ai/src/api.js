@@ -309,6 +309,15 @@ export async function checkTokenLimit({tokenId, promptText, pendingTokens}) {
   return assertOk(result, "Token limit exceeded").data;
 }
 
+export async function getTokenMetrics({periodDays = 7, tokenId = "all"} = {}) {
+  const query = new URLSearchParams({
+    periodDays: String(periodDays),
+    tokenId: tokenId || "all",
+  });
+  const result = await apiGet("", `/api/d-ai/token-metrics?${query.toString()}`);
+  return assertOk(result, "Failed to load token metrics").data;
+}
+
 export async function getStores() {
   const result = await apiGet(casibaseBase, `/api/get-store?id=${encodeURIComponent(sharedStoreId)}`);
   const store = assertOk(result, "Failed to load shared store").data;
