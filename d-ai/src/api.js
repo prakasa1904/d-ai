@@ -318,6 +318,16 @@ export async function getTokenMetrics({periodDays = 7, tokenId = "all"} = {}) {
   return assertOk(result, "Failed to load token metrics").data;
 }
 
+export async function getTokenRequestLogs({periodDays = 7, tokenId = "all", limit = 500} = {}) {
+  const query = new URLSearchParams({
+    periodDays: String(periodDays),
+    tokenId: tokenId || "all",
+    limit: String(limit),
+  });
+  const result = await apiGet("", `/api/d-ai/token-request-logs?${query.toString()}`);
+  return assertOk(result, "Failed to load token request logs").data;
+}
+
 export async function getStores() {
   const result = await apiGet(casibaseBase, `/api/get-store?id=${encodeURIComponent(sharedStoreId)}`);
   const store = assertOk(result, "Failed to load shared store").data;

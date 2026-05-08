@@ -28,6 +28,14 @@ export default defineConfig(({mode}) => {
     enabled: env.D_AI_AUDIT_LOG_ENABLED || "true",
     filePath: env.D_AI_AUDIT_LOG_FILE || ".d-ai-state/logs/request-audit.jsonl",
   };
+  const clickHouseLogs = {
+    enabled: env.D_AI_CLICKHOUSE_LOGS_ENABLED || "true",
+    baseUrl: env.D_AI_CLICKHOUSE_LOGS_URL || "http://localhost:18123",
+    username: env.D_AI_CLICKHOUSE_LOGS_USERNAME || "default",
+    password: env.D_AI_CLICKHOUSE_LOGS_PASSWORD || "default",
+    database: env.D_AI_CLICKHOUSE_LOGS_DATABASE || "d_ai_logs",
+    table: env.D_AI_CLICKHOUSE_LOGS_TABLE || "otel_logs",
+  };
   const uploadAdmin = {
     organization: env.D_AI_UPLOAD_ADMIN_ORGANIZATION || env.VITE_D_AI_UPLOAD_ADMIN_ORGANIZATION || "built-in",
     username: env.D_AI_UPLOAD_ADMIN_USERNAME || env.VITE_D_AI_UPLOAD_ADMIN_USERNAME || "admin",
@@ -45,6 +53,7 @@ export default defineConfig(({mode}) => {
       uploadAdmin,
       openMeter,
       auditLog,
+      clickHouseLogs,
     })],
     server: {
       host: "0.0.0.0",

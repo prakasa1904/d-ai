@@ -10,6 +10,7 @@ import {
   getServerTokenState,
   getStores,
   getTokenMetrics,
+  getTokenRequestLogs,
   loginWithPassword,
   mutateTokenState,
   openAnswerStream,
@@ -575,7 +576,6 @@ function emptyTokenMetrics(days = 7, selectedTokenId = "all") {
       series: buildMonitoringBuckets(days),
     },
     failureBreakdown: [],
-    requestEvents: [],
   };
 }
 
@@ -603,7 +603,44 @@ function normalizeTokenMetricsPayload(payload, days, selectedTokenId = "all") {
       series: Array.isArray(payload?.failedStatusChart?.series) ? payload.failedStatusChart.series : fallback.failedStatusChart.series,
     },
     failureBreakdown: Array.isArray(payload?.failureBreakdown) ? payload.failureBreakdown : [],
-    requestEvents: Array.isArray(payload?.requestEvents) ? payload.requestEvents : [],
+  };
+}
+
+function emptyTokenRequestLogs(days = 7, selectedTokenId = "all") {
+  return {
+    enabled: false,
+    source: "clickhouse",
+    selectedTokenId,
+    periodDays: days,
+    generatedAt: new Date().toISOString(),
+    totals: {
+      total: 0,
+      success: 0,
+      failed: 0,
+      totalTokens: 0,
+      promptTokens: 0,
+      responseTokens: 0,
+      lastSeenAt: "",
+      lastFailureAt: "",
+      lastFailureReason: "",
+    },
+    byToken: {},
+    events: [],
+  };
+}
+
+function normalizeTokenRequestLogsPayload(payload, days, selectedTokenId = "all") {
+  const fallback = emptyTokenRequestLogs(days, selectedTokenId);
+
+  return {
+    ...fallback,
+    ...payload,
+    totals: {
+      ...fallback.totals,
+      ...(payload?.totals || {}),
+    },
+    byToken: payload?.byToken || {},
+    events: Array.isArray(payload?.events) ? payload.events : [],
   };
 }
 
@@ -617,7 +654,7 @@ function requestLogDetail(entry) {
 
 function requestLogSource(entry) {
   const source = entry.source || "unknown";
-  const historyKey = entry.historyKey || "";
+  const historyKey = entry.historyKey || (entry.historyKeyHash ? entry.historyKeyHash.slice(0, 19) : "");
   return historyKey ? `${source} · ${historyKey}` : source;
 }
 
@@ -829,10 +866,12 @@ function LoginPage({onLogin}) {
 }
 
 function StatCard({label, value, detail}) {
+  const displayValue = value === null || value === undefined || value === "" ? 0 : value;
+
   return (
     <article className="stat-card">
       <span>{label}</span>
-      <strong>{value}</strong>
+      <strong>{displayValue}</strong>
       <p>{detail}</p>
     </article>
   );
@@ -1301,8 +1340,7 @@ function RateLimitTracker({tokenData, tokenMetrics, selectedTokenId, onSelectedT
   );
 }
 
-function TokenRequestLog({events, tokens, selectedTokenId, onCopy, onSelectedTokenId, periodLabelText}) {
-  const token = tokens.find((item) => item.id === selectedTokenId) || tokens[0];
+function TokenRequestLog({events, token, onCopy, periodLabelText}) {
   const rows = useMemo(
     () => [...events]
       .filter((entry) => entry.tokenId === token?.id)
@@ -1320,7 +1358,9 @@ function TokenRequestLog({events, tokens, selectedTokenId, onCopy, onSelectedTok
       tokenName: token?.name || "",
       status: entry.status,
       source: entry.source || "",
-      historyKey: entry.historyKey || "",
+      historyKeyHash: entry.historyKeyHash || "",
+      endpoint: entry.endpoint || "",
+      method: entry.method || "",
       httpStatus: entry.httpStatus || "",
       errorType: entry.errorType || "",
       errorMessage: entry.errorMessage || "",
@@ -1342,14 +1382,9 @@ function TokenRequestLog({events, tokens, selectedTokenId, onCopy, onSelectedTok
       <div className="section-heading token-chart-heading">
         <div>
           <h2>Token Request Log</h2>
-          <p className="side-note">{periodLabelText} · latest 50 entries for the selected token</p>
+          <p className="side-note">{periodLabelText} · latest 50 entries for this token</p>
         </div>
         <div className="token-log-controls">
-          <select value={token?.id || ""} onChange={(event) => onSelectedTokenId(event.target.value)}>
-            {tokens.map((item) => (
-              <option key={item.id} value={item.id}>{item.name}</option>
-            ))}
-          </select>
           <button className="small-button" disabled={!rows.length} onClick={copyLogs}>Copy logs</button>
         </div>
       </div>
@@ -1901,8 +1936,11 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
   const [periodDays, setPeriodDays] = useState(7);
   const [selectedSeriesTokenId, setSelectedSeriesTokenId] = useState("all");
   const [metrics, setMetrics] = useState(() => emptyTokenMetrics(7, "all"));
+  const [requestLogs, setRequestLogs] = useState(() => emptyTokenRequestLogs(7, "all"));
   const [metricsError, setMetricsError] = useState("");
+  const [requestLogError, setRequestLogError] = useState("");
   const [isLoadingMetrics, setIsLoadingMetrics] = useState(false);
+  const [isLoadingRequestLogs, setIsLoadingRequestLogs] = useState(false);
   const [isMutatingToken, setIsMutatingToken] = useState(false);
   const metricsTokenKey = useMemo(
     () => tokenData.tokens.map((token) => `${token.id}:${token.status || ""}:${token.lastUsedAt || ""}:${JSON.stringify(token.limits || {})}`).join("|"),
@@ -1912,6 +1950,10 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
     () => normalizeTokenMetricsPayload(metrics, periodDays, selectedSeriesTokenId),
     [metrics, periodDays, selectedSeriesTokenId],
   );
+  const tokenRequestLogs = useMemo(
+    () => normalizeTokenRequestLogsPayload(requestLogs, periodDays, "all"),
+    [requestLogs, periodDays],
+  );
   const summaries = useMemo(() => ({totals: tokenMetrics.totals, byToken: tokenMetrics.byToken}), [tokenMetrics]);
   const requestSummary = tokenMetrics.totals;
   const requestByToken = tokenMetrics.requestByToken || tokenMetrics.byToken;
@@ -1919,26 +1961,8 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
   const requestSeries = tokenMetrics.requestSeries;
   const failedStatusChart = tokenMetrics.failedStatusChart;
   const failures = tokenMetrics.failureBreakdown;
-  const recentUsage = useMemo(() => tokenMetrics.requestEvents.slice(0, 10), [tokenMetrics.requestEvents]);
+  const recentUsage = useMemo(() => tokenRequestLogs.events.slice(0, 10), [tokenRequestLogs.events]);
   const selectedPeriodLabel = periodLabel(periodDays);
-
-  async function loadMetrics() {
-    setIsLoadingMetrics(true);
-    setMetricsError("");
-
-    try {
-      const nextMetrics = await getTokenMetrics({
-        periodDays,
-        tokenId: selectedSeriesTokenId,
-      });
-      setMetrics(normalizeTokenMetricsPayload(nextMetrics, periodDays, selectedSeriesTokenId));
-    } catch (error) {
-      setMetrics(emptyTokenMetrics(periodDays, selectedSeriesTokenId));
-      setMetricsError(error.message);
-    } finally {
-      setIsLoadingMetrics(false);
-    }
-  }
 
   async function logout() {
     await signOut();
@@ -2050,6 +2074,34 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
     };
   }, [periodDays, selectedSeriesTokenId, metricsTokenKey]);
 
+  useEffect(() => {
+    let active = true;
+
+    setIsLoadingRequestLogs(true);
+    setRequestLogError("");
+    getTokenRequestLogs({periodDays, tokenId: "all", limit: 500})
+      .then((nextLogs) => {
+        if (active) {
+          setRequestLogs(normalizeTokenRequestLogsPayload(nextLogs, periodDays, "all"));
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          setRequestLogs(emptyTokenRequestLogs(periodDays, "all"));
+          setRequestLogError(error.message);
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setIsLoadingRequestLogs(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [periodDays, metricsTokenKey]);
+
   return (
     <main className="chat-shell">
       <AppHeader account={account} currentPath="/tokens" onLogout={logout} onNavigate={onNavigate} />
@@ -2097,12 +2149,14 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
 
         {formError ? <div className="error-banner">{formError}</div> : null}
         {metricsError ? <div className="error-banner">{metricsError}</div> : null}
+        {requestLogError ? <div className="error-banner">{requestLogError}</div> : null}
         {notice ? <div className="success-banner">{notice}</div> : null}
         {isLoadingMetrics ? <p className="side-note">Refreshing OpenMeter metrics...</p> : null}
+        {isLoadingRequestLogs ? <p className="side-note">Refreshing ClickHouse request logs...</p> : null}
 
         <section className="stats-grid" aria-label="Token totals">
           <StatCard label="Tokens" value={tokenData.tokens.length} detail={`${tokenData.tokens.filter(isTokenActive).length} active`} />
-          <StatCard label="Attempts" value={requestSummary.total} detail={`${selectedPeriodLabel} token requests`} />
+          <StatCard label="Attempts" value={requestSummary.requests} detail={`${selectedPeriodLabel} token requests`} />
           <StatCard label="Success rate" value={formatPercent(requestSummary.successRate)} detail={`${requestSummary.success} succeeded`} />
           <StatCard label="Failed" value={requestSummary.failed} detail={`${selectedPeriodLabel} failed requests`} />
           <StatCard label="Token usage" value={summaries.totals.totalTokens} detail={`${summaries.totals.promptTokens} prompt, ${summaries.totals.responseTokens} response`} />
@@ -2139,6 +2193,7 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
               {tokenData.tokens.map((token) => {
                 const usage = summaries.byToken[token.id] || {};
                 const requestStats = requestByToken[token.id] || {};
+                const logStats = tokenRequestLogs.byToken[token.id] || {};
 
                 return (
                   <article className="token-row" key={token.id}>
@@ -2148,10 +2203,10 @@ function TokensPage({account, tokenData, onCreateToken, onToggleToken, onDeleteT
                     </div>
                     <span className={`status-pill ${isTokenActive(token) ? "active" : "inactive"}`}>{token.status}</span>
                     <div className="token-usage">
-                      <span>{requestStats.total || 0} attempts · {formatPercent(requestStats.successRate)}</span>
-                      <span>{requestStats.failed || 0} failed · {requestStats.lastFailureReason || "No failures"}</span>
+                      <span>{requestStats.requests || 0} attempts · {formatPercent(requestStats.successRate)}</span>
+                      <span>{requestStats.failed || 0} failed · {logStats.lastFailureReason || "No failures"}</span>
                       <span>{usage.totalTokens || 0} / {limitText(token.limits?.totalTokens || 0)} quota</span>
-                      <span>{usage.lastUsedAt ? formatChatTime(usage.lastUsedAt) : `No use in ${selectedPeriodLabel}`}</span>
+                      <span>{logStats.lastSeenAt ? formatChatTime(logStats.lastSeenAt) : `No logs in ${selectedPeriodLabel}`}</span>
                     </div>
                     <div className="token-actions">
                       <button className="small-button" onClick={() => copyToken(token)}>Copy</button>
@@ -2203,7 +2258,9 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [metrics, setMetrics] = useState(() => emptyTokenMetrics(7, tokenId));
+  const [requestLogs, setRequestLogs] = useState(() => emptyTokenRequestLogs(7, tokenId));
   const [isLoadingMetrics, setIsLoadingMetrics] = useState(false);
+  const [isLoadingRequestLogs, setIsLoadingRequestLogs] = useState(false);
   const [isMutatingToken, setIsMutatingToken] = useState(false);
   const token = tokenData.tokens.find((item) => item.id === tokenId);
   const metricsTokenKey = useMemo(
@@ -2214,8 +2271,13 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
     () => normalizeTokenMetricsPayload(metrics, periodDays, token?.id || tokenId),
     [metrics, periodDays, token?.id, tokenId],
   );
-  const periodRequestEvents = tokenMetrics.requestEvents;
+  const tokenRequestLogs = useMemo(
+    () => normalizeTokenRequestLogsPayload(requestLogs, periodDays, token?.id || tokenId),
+    [requestLogs, periodDays, token?.id, tokenId],
+  );
+  const periodRequestEvents = tokenRequestLogs.events;
   const usage = token ? tokenMetrics.byToken[token.id] || {} : {};
+  const logUsage = token ? tokenRequestLogs.byToken[token.id] || {} : {};
   const requestSummary = tokenMetrics.selectedTotals || tokenMetrics.totals;
   const requestSeries = tokenMetrics.requestSeries;
   const failedStatusChart = tokenMetrics.failedStatusChart;
@@ -2324,6 +2386,39 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
     };
   }, [periodDays, token?.id, tokenId, metricsTokenKey]);
 
+  useEffect(() => {
+    if (!token) {
+      setRequestLogs(emptyTokenRequestLogs(periodDays, tokenId));
+      return undefined;
+    }
+
+    let active = true;
+
+    setIsLoadingRequestLogs(true);
+    setError("");
+    getTokenRequestLogs({periodDays, tokenId: token.id, limit: 500})
+      .then((nextLogs) => {
+        if (active) {
+          setRequestLogs(normalizeTokenRequestLogsPayload(nextLogs, periodDays, token.id));
+        }
+      })
+      .catch((nextError) => {
+        if (active) {
+          setRequestLogs(emptyTokenRequestLogs(periodDays, token.id));
+          setError(nextError.message);
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setIsLoadingRequestLogs(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [periodDays, token?.id, tokenId, metricsTokenKey]);
+
   if (!token) {
     return (
       <main className="chat-shell">
@@ -2373,6 +2468,7 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
         {error ? <div className="error-banner">{error}</div> : null}
         {notice ? <div className="success-banner">{notice}</div> : null}
         {isLoadingMetrics ? <p className="side-note">Refreshing OpenMeter metrics...</p> : null}
+        {isLoadingRequestLogs ? <p className="side-note">Refreshing ClickHouse request logs...</p> : null}
 
         <section className="dashboard-section token-section token-detail-overview">
           <div className="token-detail-main">
@@ -2390,7 +2486,7 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
             </div>
             <div>
               <span>Last used</span>
-              <strong>{formatFullTime(usage.lastUsedAt || token.lastUsedAt)}</strong>
+              <strong>{formatFullTime(logUsage.lastSeenAt || token.lastUsedAt)}</strong>
             </div>
             <div>
               <span>Total quota</span>
@@ -2400,7 +2496,7 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
         </section>
 
         <section className="stats-grid" aria-label="Selected token totals">
-          <StatCard label="Attempts" value={requestSummary.total} detail={`${selectedPeriodLabel} token requests`} />
+          <StatCard label="Attempts" value={requestSummary.requests} detail={`${selectedPeriodLabel} token requests`} />
           <StatCard label="Success rate" value={formatPercent(requestSummary.successRate)} detail={`${requestSummary.success} succeeded`} />
           <StatCard label="Failed" value={requestSummary.failed} detail={`${selectedPeriodLabel} failed requests`} />
           <StatCard label="Token usage" value={usage.totalTokens || 0} detail={`${usage.promptTokens || 0} prompt, ${usage.responseTokens || 0} response`} />
@@ -2440,10 +2536,8 @@ function TokenDetailPage({account, tokenId, tokenData, onToggleToken, onDeleteTo
         <TokenRequestLog
           events={periodRequestEvents}
           periodLabelText={selectedPeriodLabel}
-          selectedTokenId={token.id}
-          tokens={tokenData.tokens}
+          token={token}
           onCopy={copyText}
-          onSelectedTokenId={selectToken}
         />
       </section>
     </main>

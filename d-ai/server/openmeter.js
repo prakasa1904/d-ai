@@ -221,7 +221,6 @@ function emptyMetrics({periodDays, selectedTokenId = "all", enabled = false, sou
       series: buildMetricBuckets(periodDays),
     },
     failureBreakdown: [],
-    requestEvents: [],
   };
 }
 
@@ -265,42 +264,6 @@ function formatLimitCheck({key, label, used, projected, limit, source = "openmet
     missing: false,
     blocked: exceeded,
     remaining: limit > 0 ? Math.max(0, limit - used) : Infinity,
-  };
-}
-
-function eventRows(payload) {
-  if (Array.isArray(payload)) {
-    return payload;
-  }
-
-  return Array.isArray(payload?.data) ? payload.data : [];
-}
-
-function requestEventFromOpenMeter(row) {
-  const event = row?.event || {};
-  const data = event.data || {};
-  const httpStatus = data.http_status || data.httpStatus || "";
-  const status = normalizeStatus(data.status, httpStatus);
-
-  return {
-    id: event.id || `om_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    tokenId: data.token_id || "",
-    createdAt: event.time || row?.ingestedAt || row?.storedAt || "",
-    status,
-    source: data.source || event.source || "openmeter",
-    httpStatus: httpStatus || (status === "success" ? 200 : ""),
-    errorType: data.error_type || "",
-    errorMessage: data.error_message || "",
-    failureStage: data.failure_stage || "",
-    promptTokens: Number(data.prompt_tokens || 0),
-    responseTokens: Number(data.completion_tokens || 0),
-    totalTokens: Number(data.tokens || 0),
-    latencyMs: Number(data.latency_ms || 0),
-    historyKey: data.history_key || "",
-    chatName: data.chat_name || "",
-    chatTitle: data.chat_title || "",
-    modelProvider: data.model || "",
-    usageId: data.usage_id || "",
   };
 }
 
@@ -631,37 +594,6 @@ export function createOpenMeterClient(options = {}) {
     }
   }
 
-  async function listTokenEvents({tokens, account, from, to, limit = 500}) {
-    if (!config.enabled || !tokens.length) {
-      return [];
-    }
-
-    const tokenIds = new Set(tokens.map((token) => token.id));
-    const subjects = new Set(config.subjectMode === "account"
-      ? [accountSubject(account)]
-      : tokens.map((token) => subjectFor({token, account})));
-    const fromTime = from ? new Date(from).getTime() : 0;
-    const toTime = to ? new Date(to).getTime() : Date.now();
-    const rows = eventRows(await request("/api/v1/events"));
-
-    return rows
-      .filter((row) => {
-        const event = row?.event || {};
-        const data = event.data || {};
-        const eventTime = new Date(event.time || row?.ingestedAt || row?.storedAt || "").getTime();
-
-        return event.type === config.eventType
-          && subjects.has(event.subject)
-          && tokenIds.has(data.token_id)
-          && !Number.isNaN(eventTime)
-          && eventTime >= fromTime
-          && eventTime <= toTime;
-      })
-      .map(requestEventFromOpenMeter)
-      .sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")))
-      .slice(0, limit);
-  }
-
   async function getLimitSnapshot({token, account, at = now()}) {
     const limits = normalizeTokenLimits(token?.limits);
     const subject = subjectFor({token, account});
@@ -747,7 +679,7 @@ export function createOpenMeterClient(options = {}) {
       return metrics;
     }
 
-    const [totalRows, promptRows, completionRows, costRows, requestRows, requestEvents, limitEntries] = await Promise.all([
+    const [totalRows, promptRows, completionRows, costRows, requestRows, limitEntries] = await Promise.all([
       queryRowsForTokens(config.meterSlug, {tokens, account, from, to, windowSize}),
       queryRowsForTokens(config.promptMeterSlug, {tokens, account, from, to, windowSize}),
       queryRowsForTokens(config.completionMeterSlug, {tokens, account, from, to, windowSize}),
@@ -760,12 +692,10 @@ export function createOpenMeterClient(options = {}) {
         windowSize,
         groupBy: ["status", "http_status", "error_type", "failure_stage"],
       }),
-      listTokenEvents({tokens, account, from, to}),
       Promise.all(tokens.map(async (token) => [token.id, await getLimitSnapshot({token, account})])),
     ]);
 
     metrics.limitByToken = Object.fromEntries(limitEntries);
-    metrics.requestEvents = requestEvents;
 
     totalRows.forEach((row) => addTokenValue(metrics.byToken, tokenIdFromRow(row), "totalTokens", row.value));
     promptRows.forEach((row) => addTokenValue(metrics.byToken, tokenIdFromRow(row), "promptTokens", row.value));
@@ -783,22 +713,6 @@ export function createOpenMeterClient(options = {}) {
 
     Object.values(metrics.byToken).forEach((summary) => {
       summary.successRate = summary.requests > 0 ? (summary.success / summary.requests) * 100 : null;
-    });
-
-    requestEvents.forEach((event) => {
-      const summary = metrics.byToken[event.tokenId];
-      if (!summary) {
-        return;
-      }
-
-      if (event.status === "success") {
-        if (!summary.lastUsedAt || event.createdAt > summary.lastUsedAt) {
-          summary.lastUsedAt = event.createdAt;
-        }
-      } else if (!summary.lastFailureAt || event.createdAt > summary.lastFailureAt) {
-        summary.lastFailureAt = event.createdAt;
-        summary.lastFailureReason = event.errorMessage || event.errorType || event.failureStage || "Failed";
-      }
     });
 
     metrics.totals = Object.values(metrics.byToken).reduce((result, summary) => ({

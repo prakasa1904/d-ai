@@ -55,6 +55,14 @@ The OpenTelemetry Collector config is:
 conf/d-ai-otel-collector/config.yaml
 ```
 
+D-AI reads these logs through its local middleware endpoint:
+
+```text
+GET /api/d-ai/token-request-logs?periodDays=7&tokenId=all
+```
+
+The token pages use this endpoint for detailed request log tables. OpenMeter remains the source for aggregate usage charts, success-rate charts, failure counts, and quota checks.
+
 ## Recommendation
 
 For D-AI, use **ClickHouse as the default logging store** for structured request/audit logs.

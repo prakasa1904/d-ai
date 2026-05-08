@@ -55,7 +55,7 @@ requests_total           SUM $.request_count
 cost_total               SUM $.price
 ```
 
-The D-AI token dashboard queries these OpenMeter meters through the backend endpoint `/api/d-ai/token-metrics`.
+The D-AI token dashboard queries these OpenMeter meters through the backend endpoint `/api/d-ai/token-metrics`. Detailed request log tables are intentionally separate and use ClickHouse through `/api/d-ai/token-request-logs`.
 
 ## D-AI Environment
 

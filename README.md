@@ -1,6 +1,6 @@
 # D-AI
 
-Custom React frontend for a local Casdoor + Casibase + OpenMeter stack. It includes Casdoor login and registration, Casibase chat, editable chat history, streaming steer/stop controls, usage dashboard, token management, OpenMeter-backed usage metering, optional token limits, user profile management, and a local OpenAI-compatible chat endpoint.
+Custom React frontend for a local Casdoor + Casibase + OpenMeter + ClickHouse stack. It includes Casdoor login and registration, Casibase chat, editable chat history, streaming steer/stop controls, usage dashboard, token management, OpenMeter-backed usage metering, ClickHouse-backed request logs, optional token limits, user profile management, and a local OpenAI-compatible chat endpoint.
 
 ## Prerequisites
 
@@ -142,6 +142,7 @@ D-AI also adds local Vite middleware routes:
 /api/d-ai/token-action        Mutates token metadata and emits usage/request events
 /api/d-ai/token-limit-check   Checks OpenMeter-backed token limits before browser chat sends to Casibase
 /api/d-ai/token-metrics       Returns OpenMeter-backed token dashboard metrics
+/api/d-ai/token-request-logs  Returns ClickHouse-backed token request audit logs
 /api/v1/models                Lists the D-AI OpenAI-compatible model ID
 /api/v1/histories             Lists API histories for the bearer token
 /api/v1/history               Gets one API history by key, including messages when available
@@ -179,6 +180,12 @@ OPENMETER_SUBJECT_MODE=token
 OPENMETER_FAIL_CLOSED=false
 D_AI_AUDIT_LOG_ENABLED=true
 D_AI_AUDIT_LOG_FILE=.d-ai-state/logs/request-audit.jsonl
+D_AI_CLICKHOUSE_LOGS_ENABLED=true
+D_AI_CLICKHOUSE_LOGS_URL=http://localhost:18123
+D_AI_CLICKHOUSE_LOGS_USERNAME=default
+D_AI_CLICKHOUSE_LOGS_PASSWORD=default
+D_AI_CLICKHOUSE_LOGS_DATABASE=d_ai_logs
+D_AI_CLICKHOUSE_LOGS_TABLE=otel_logs
 ```
 
 `VITE_CASDOOR_CLIENT_SECRET` is used by the local Vite middleware for development profile updates. Do not expose this dev middleware directly to untrusted clients.
@@ -203,7 +210,7 @@ Restart `npm run dev` after changing `vite.config.js`, server middleware, or `.e
 - Chat page: create new chats, upload image attachments into the selected Casibase store, forward image metadata into prompts, open history, rename chats, delete chats, and stop or steer an active streaming response.
 - Dashboard page: view signed-in user chat and message usage.
 - Tokens summary page (`/tokens`): create/copy/delete/activate/deactivate D-AI tokens, monitor fleet-level request success rate, failed requests, failure breakdown, token usage, and open token details.
-- Token detail page (`/tokens/{token-id}`): inspect one token's metadata, API reference, OpenMeter-backed rate limits, usage charts, failure charts, and request events.
+- Token detail page (`/tokens/{token-id}`): inspect one token's metadata, API reference, OpenMeter-backed rate limits, usage charts, failure charts, and ClickHouse-backed request logs.
 - Profile page: update Casdoor profile fields such as display name, avatar, contact info, work info, preferences, and bio.
 
 Profile updates require a Casdoor access token. New logins obtain it automatically. If you were already signed in before this feature was added, open `Profile`, enter your current password in `Confirm Access`, and save again.

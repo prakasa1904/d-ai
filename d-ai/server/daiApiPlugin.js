@@ -8,6 +8,7 @@ import {
 } from "../src/tokens.js";
 import {createOpenMeterClient} from "./openmeter.js";
 import {createAuditLogger} from "./auditLogger.js";
+import {createClickHouseLogClient} from "./clickhouseLogs.js";
 
 const apiModel = "d-ai-casibase";
 const stateDirectory = ".d-ai-state";
@@ -749,6 +750,32 @@ async function getTokenMetrics({request, response, root, casibaseTarget, openMet
   sendJson(response, 200, {
     status: "ok",
     data: metrics,
+  });
+}
+
+async function getTokenRequestLogs({request, response, root, casibaseTarget, clickHouseLogs}) {
+  if (request.method !== "GET") {
+    sendError(response, 405, "Only GET is supported");
+    return;
+  }
+
+  const {account, sessionCookie} = await signedInAccount({request, casibaseTarget});
+  const state = await loadServerState(root);
+  const {accountState} = ensureAccountState(state, account, sessionCookie);
+  const url = new URL(request.url || "/", "http://localhost");
+  const periodDays = Number(url.searchParams.get("periodDays") || 7);
+  const selectedTokenId = url.searchParams.get("tokenId") || "all";
+  const limit = Number(url.searchParams.get("limit") || 500);
+  const logs = await clickHouseLogs.getRequestLogs({
+    accountState,
+    periodDays,
+    selectedTokenId,
+    limit,
+  });
+
+  sendJson(response, 200, {
+    status: "ok",
+    data: logs,
   });
 }
 
@@ -1784,6 +1811,7 @@ function installMiddleware(server, options) {
   const sharedStoreId = options.sharedStoreId || "admin/ifm-v0";
   const uploadAdmin = options.uploadAdmin || {};
   const openMeter = createOpenMeterClient(options.openMeter || {});
+  const clickHouseLogs = createClickHouseLogClient(options.clickHouseLogs || {});
   const auditLogger = createAuditLogger({
     root,
     ...(options.auditLog || {}),
@@ -1810,6 +1838,11 @@ function installMiddleware(server, options) {
 
       if (url.pathname === "/api/d-ai/token-metrics") {
         await getTokenMetrics({request, response, root, casibaseTarget, openMeter});
+        return;
+      }
+
+      if (url.pathname === "/api/d-ai/token-request-logs") {
+        await getTokenRequestLogs({request, response, root, casibaseTarget, clickHouseLogs});
         return;
       }
 

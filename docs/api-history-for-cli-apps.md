@@ -87,7 +87,7 @@ The D-AI chat sidebar is for browser-created chat histories. API histories creat
 
 - Browser users should not see every background API or CLI session mixed into their normal chat sidebar.
 - API token owners still need observability for usage, failures, limits, and quota through the token pages.
-- Token pages use OpenMeter-backed metrics so CLI traffic is observable without mixing API histories into the main chat sidebar.
+- Token pages use OpenMeter-backed metrics and ClickHouse-backed request logs so CLI traffic is observable without mixing API histories into the main chat sidebar.
 
 Useful fields for a future API history view:
 
@@ -99,6 +99,7 @@ Useful fields for a future API history view:
 - OpenMeter success rate
 - OpenMeter failed request count
 - OpenMeter input and output tokens
+- ClickHouse recent request log entries
 - Last model/store used
 - Open read-only history action
 
