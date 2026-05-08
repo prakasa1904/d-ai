@@ -46,6 +46,16 @@ Stop the D-AI frontend:
 DAI_PORT=5175 ./scripts/stop-dai.sh
 ```
 
+Loop-test a D-AI API token against the OpenAI-compatible chat endpoint:
+
+```bash
+./scripts/test-token.sh --token dai_xxx
+./scripts/test-token.sh --token dai_xxx --count 20 --delay 0.5
+./scripts/test-token.sh --token dai_xxx --base-url http://localhost:5175/api/v1
+./scripts/test-token.sh --token dai_xxx --forever --delay 2
+./scripts/test-token.sh --token dai_xxx --until-fail --history-key quota-smoke
+```
+
 Open the URL printed by Vite. The usual local URL is:
 
 ```text
