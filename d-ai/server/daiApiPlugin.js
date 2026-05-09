@@ -26,6 +26,25 @@ const imageFileExtensions = new Set([
   ".tiff",
   ".webp",
 ]);
+const profileColumns = [
+  "displayName",
+  "firstName",
+  "lastName",
+  "email",
+  "phone",
+  "countryCode",
+  "region",
+  "location",
+  "title",
+  "affiliation",
+  "homepage",
+  "avatar",
+  "bio",
+  "language",
+  "gender",
+  "birthday",
+  "education",
+];
 
 function now() {
   return new Date().toISOString();
@@ -259,6 +278,8 @@ function ensureAccountState(state, account, sessionCookie) {
   const accountState = {
     account: publicAccount(account),
     sessionCookie: sessionCookie || previous.sessionCookie || "",
+    casdoorAccessToken: previous.casdoorAccessToken || "",
+    casdoorAccessTokenExpiresAt: previous.casdoorAccessTokenExpiresAt || "",
     tokens: Array.isArray(previous.tokens) ? previous.tokens : [],
     updatedAt: now(),
   };
@@ -367,6 +388,23 @@ async function readCasibaseJson(response) {
   return payload;
 }
 
+async function readCasdoorJson(response) {
+  const text = await response.text();
+
+  let payload;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(`Expected JSON from Casdoor, got: ${text.slice(0, 160)}`);
+  }
+
+  if (!response.ok || payload?.status === "error") {
+    throw new Error(payload?.msg || payload?.error_description || payload?.error || `${response.status} ${response.statusText}`);
+  }
+
+  return payload;
+}
+
 function casibaseHeaders(sessionCookie, contentType = false) {
   return {
     "Accept-Language": "en",
@@ -404,6 +442,51 @@ function casibaseClient(casibaseTarget) {
       return response.body;
     },
   };
+}
+
+function casdoorHeaders(accessToken, contentType = false) {
+  return {
+    "Accept-Language": "en",
+    ...(contentType ? {"Content-Type": "text/plain;charset=UTF-8"} : {}),
+    ...(accessToken ? {Authorization: `Bearer ${accessToken}`} : {}),
+  };
+}
+
+async function exchangeCasdoorCodeForAccessToken({code, casdoorTarget, casdoorClientId, casdoorClientSecret, casdoorRedirectUri}) {
+  if (!casdoorClientSecret) {
+    throw new Error("Missing Casdoor client secret");
+  }
+
+  const tokenResponse = await fetch(`${casdoorTarget}/api/login/oauth/access_token`, {
+    method: "POST",
+    headers: {"Content-Type": "application/x-www-form-urlencoded"},
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: casdoorClientId,
+      client_secret: casdoorClientSecret,
+      code,
+      redirect_uri: casdoorRedirectUri,
+    }),
+  });
+  const payload = await tokenResponse.json().catch(() => null);
+
+  if (!tokenResponse.ok || !payload?.access_token) {
+    throw new Error(payload?.error_description || payload?.error || "Failed to exchange Casdoor token");
+  }
+
+  return payload;
+}
+
+async function storeCasdoorAccessTokenForSession({request, root, casibaseTarget, accessToken, expiresIn}) {
+  const {account, sessionCookie} = await signedInAccount({request, casibaseTarget});
+  const state = await loadServerState(root);
+  const {accountState} = ensureAccountState(state, account, sessionCookie);
+  accountState.casdoorAccessToken = accessToken;
+  accountState.casdoorAccessTokenExpiresAt = expiresIn
+    ? new Date(Date.now() + Number(expiresIn) * 1000).toISOString()
+    : "";
+  await saveServerState(root, state);
+  return accountState;
 }
 
 async function loginCasdoorForCode({casdoorTarget, casdoorClientId, casdoorRedirectUri, organization, username, password}) {
@@ -797,7 +880,7 @@ async function getTokenRequestLogs({request, response, root, casibaseTarget, cli
   });
 }
 
-async function exchangeCasdoorToken({request, response, casdoorTarget, casdoorClientId, casdoorClientSecret, casdoorRedirectUri}) {
+async function exchangeCasdoorToken({request, response, root, casibaseTarget, casdoorTarget, casdoorClientId, casdoorClientSecret, casdoorRedirectUri}) {
   if (request.method !== "POST") {
     sendError(response, 405, "Only POST is supported");
     return;
@@ -809,35 +892,171 @@ async function exchangeCasdoorToken({request, response, casdoorTarget, casdoorCl
     return;
   }
 
-  if (!casdoorClientSecret) {
-    sendError(response, 500, "Missing Casdoor client secret", "server_error");
+  let payload;
+  try {
+    payload = await exchangeCasdoorCodeForAccessToken({
+      code: body.code,
+      casdoorTarget,
+      casdoorClientId,
+      casdoorClientSecret,
+      casdoorRedirectUri,
+    });
+  } catch (error) {
+    sendError(response, 500, error.message, "server_error");
     return;
   }
 
-  const tokenResponse = await fetch(`${casdoorTarget}/api/login/oauth/access_token`, {
-    method: "POST",
-    headers: {"Content-Type": "application/x-www-form-urlencoded"},
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      client_id: casdoorClientId,
-      client_secret: casdoorClientSecret,
-      code: body.code,
-      redirect_uri: casdoorRedirectUri,
-    }),
-  });
-  const payload = await tokenResponse.json().catch(() => null);
+  let hasProfileAccess = false;
+  try {
+    await storeCasdoorAccessTokenForSession({
+      request,
+      root,
+      casibaseTarget,
+      accessToken: payload.access_token,
+      expiresIn: payload.expires_in,
+    });
+    hasProfileAccess = true;
+  } catch {
+    hasProfileAccess = false;
+  }
 
-  if (!tokenResponse.ok || !payload?.access_token) {
-    sendError(response, tokenResponse.status || 500, payload?.error_description || payload?.error || "Failed to exchange Casdoor token");
+  sendJson(response, 200, {
+    status: "ok",
+    data: {
+      tokenType: payload.token_type || "Bearer",
+      hasProfileAccess,
+    },
+  });
+}
+
+async function refreshCasdoorProfileAccess({request, response, root, casibaseTarget, casdoorTarget, casdoorClientId, casdoorClientSecret, casdoorRedirectUri}) {
+  if (request.method !== "POST") {
+    sendError(response, 405, "Only POST is supported");
+    return;
+  }
+
+  const body = await readJsonBody(request);
+  const password = String(body.password || "");
+  if (!password) {
+    sendError(response, 400, "Current password is required");
+    return;
+  }
+
+  const {account} = await signedInAccount({request, casibaseTarget});
+  const loginCode = await loginCasdoorForCode({
+    casdoorTarget,
+    casdoorClientId,
+    casdoorRedirectUri,
+    organization: account.owner,
+    username: account.name,
+    password,
+  });
+  const payload = await exchangeCasdoorCodeForAccessToken({
+    code: loginCode.code,
+    casdoorTarget,
+    casdoorClientId,
+    casdoorClientSecret,
+    casdoorRedirectUri,
+  });
+
+  await storeCasdoorAccessTokenForSession({
+    request,
+    root,
+    casibaseTarget,
+    accessToken: payload.access_token,
+    expiresIn: payload.expires_in,
+  });
+
+  sendJson(response, 200, {
+    status: "ok",
+    data: {
+      hasProfileAccess: true,
+    },
+  });
+}
+
+async function getCasdoorProfile({request, response, root, casibaseTarget, casdoorTarget}) {
+  if (request.method !== "GET") {
+    sendError(response, 405, "Only GET is supported");
+    return;
+  }
+
+  const {account, sessionCookie} = await signedInAccount({request, casibaseTarget});
+  const state = await loadServerState(root);
+  const {accountState} = ensureAccountState(state, account, sessionCookie);
+  const id = `${account.owner}/${account.name}`;
+
+  try {
+    const payload = await readCasdoorJson(await fetch(`${casdoorTarget}/api/get-user?id=${encodeURIComponent(id)}`, {
+      headers: casdoorHeaders(accountState.casdoorAccessToken),
+    }));
+    sendJson(response, 200, {
+      status: "ok",
+      data: {
+        ...payload.data,
+        hasProfileAccess: Boolean(accountState.casdoorAccessToken),
+      },
+    });
+  } catch {
+    sendJson(response, 200, {
+      status: "ok",
+      data: {
+        ...account,
+        hasProfileAccess: Boolean(accountState.casdoorAccessToken),
+      },
+    });
+  }
+}
+
+async function updateCasdoorProfile({request, response, root, casibaseTarget, casdoorTarget}) {
+  if (request.method !== "POST" && request.method !== "PATCH") {
+    sendError(response, 405, "Only POST or PATCH is supported");
+    return;
+  }
+
+  const body = await readJsonBody(request);
+  const {account, sessionCookie} = await signedInAccount({request, casibaseTarget});
+  const state = await loadServerState(root);
+  const {accountState} = ensureAccountState(state, account, sessionCookie);
+
+  if (!accountState.casdoorAccessToken) {
+    sendError(response, 401, "Enter your current password once to authorize profile updates.", "authentication_error");
+    return;
+  }
+
+  const currentProfile = body.profile || account;
+  const updates = body.updates || {};
+  const id = `${currentProfile.owner || account.owner}/${currentProfile.name || account.name}`;
+  const query = new URLSearchParams({
+    id,
+    columns: profileColumns.join(","),
+  });
+  const nextProfile = {
+    ...currentProfile,
+    ...updates,
+    password: currentProfile.password || "***",
+    updatedTime: now(),
+  };
+
+  try {
+    await readCasdoorJson(await fetch(`${casdoorTarget}/api/update-user?${query.toString()}`, {
+      method: "POST",
+      headers: casdoorHeaders(accountState.casdoorAccessToken, true),
+      body: JSON.stringify(nextProfile),
+    }));
+  } catch (error) {
+    const message = error.message === "Unauthorized operation"
+      ? "Profile save was rejected by Casdoor. Enter your current password again, then retry."
+      : error.message;
+    sendError(response, 403, message, "authentication_error");
     return;
   }
 
   sendJson(response, 200, {
     status: "ok",
     data: {
-      accessToken: payload.access_token,
-      expiresIn: payload.expires_in,
-      tokenType: payload.token_type || "Bearer",
+      ...nextProfile,
+      hasProfileAccess: true,
     },
   });
 }
@@ -1864,10 +2083,35 @@ function installMiddleware(server, options) {
         return;
       }
 
+      if (url.pathname === "/api/d-ai/profile-access") {
+        await refreshCasdoorProfileAccess({
+          request,
+          response,
+          root,
+          casibaseTarget,
+          casdoorTarget,
+          casdoorClientId,
+          casdoorClientSecret,
+          casdoorRedirectUri,
+        });
+        return;
+      }
+
+      if (url.pathname === "/api/d-ai/profile") {
+        if (request.method === "GET") {
+          await getCasdoorProfile({request, response, root, casibaseTarget, casdoorTarget});
+        } else {
+          await updateCasdoorProfile({request, response, root, casibaseTarget, casdoorTarget});
+        }
+        return;
+      }
+
       if (url.pathname === "/api/d-ai/casdoor-token") {
         await exchangeCasdoorToken({
           request,
           response,
+          root,
+          casibaseTarget,
           casdoorTarget,
           casdoorClientId,
           casdoorClientSecret,

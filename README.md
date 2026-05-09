@@ -153,7 +153,9 @@ The Vite dev server proxies browser calls:
 D-AI also adds local Vite middleware routes:
 
 ```text
-/api/d-ai/casdoor-token       Exchanges a Casdoor OAuth code for a profile access token
+/api/d-ai/casdoor-token       Exchanges a Casdoor OAuth code and stores profile access server-side
+/api/d-ai/profile             Reads/updates Casdoor profile data through D-AI backend
+/api/d-ai/profile-access      Refreshes backend-held Casdoor profile access after password confirmation
 /api/d-ai/upload-file         Uploads chat attachments into the configured Casibase store
 /api/d-ai/token-state         Reads the signed-in user's D-AI token metadata
 /api/d-ai/token-action        Mutates token metadata and syncs OpenMeter customer entitlements
@@ -243,7 +245,7 @@ Casibase can still generate its own chat titles, such as `New Chat - 1`, after a
 
 Chat attachments are intentionally limited to images in D-AI. Casibase's document/vector indexer does not support image extensions such as `.jpeg`, so D-AI stores the image and sends image metadata/URL context to the chat instead of treating the upload as a text document. Image understanding still depends on the selected Casibase model provider: use a vision-capable model, and make sure the image URL is reachable by that model runtime.
 
-D-AI token metadata is handled by the local middleware in development. Usage metrics, request metrics, and quota entitlement values come from OpenMeter. Detailed request audit logs are written outside token state and shipped to ClickHouse by OpenTelemetry Collector. For ownership boundaries, local persistence, security, and production guidance, see [Application Responsibilities](docs/application-responsibilities.md).
+D-AI token metadata is handled by the local middleware in development. Usage metrics, request metrics, and quota entitlement values come from OpenMeter. Detailed request audit logs are written outside token state and shipped to ClickHouse by OpenTelemetry Collector. For ownership boundaries, local persistence, security, and production guidance, see [Application Responsibilities](docs/application-responsibilities.md). For the source of each UI table, chart, chat history, upload record, and token log, see [Data Sources](docs/data-sources.md).
 
 For `/api/v1/chat/completions`, reuse the same `X-D-AI-History-Key` header to append requests to the same Casibase chat history. If the header is omitted, D-AI uses `default`, so each token has one stable default API conversation. Use a different history key only when you want a separate API conversation.
 

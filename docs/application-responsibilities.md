@@ -2,6 +2,8 @@
 
 This document explains the responsibility boundary between Casdoor, Casibase, and D-AI in the local development stack.
 
+For a screen-by-screen map of where UI data is stored, see [Data Sources](data-sources.md).
+
 ## Component Map
 
 ```text
@@ -85,7 +87,7 @@ It must stay local and git-ignored.
 
 `d-ai/.d-ai-state/tokens.json` is a local persistence file used by the Vite middleware while simulating the production D-AI backend.
 
-It exists because the current D-AI API layer is local middleware, not a deployed backend service yet. The file lets D-AI remember created tokens, token status, and session-cookie bindings after the browser refreshes or the Vite dev server restarts.
+It exists because the current D-AI API layer is local middleware, not a deployed backend service yet. The file lets D-AI remember created tokens, token status, Casibase session-cookie bindings, and backend-held Casdoor profile access after refreshes or Vite dev server restarts.
 
 This file is not the source of truth for token dashboard metrics, quota counters, quota limit values, entitlement values, or request audit logs. OpenMeter is the source for usage totals, request totals, failure analytics, quota limit values, and customer entitlement values. ClickHouse is the request audit log store.
 
